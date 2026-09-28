@@ -1,0 +1,17 @@
+/Library/
+/Temp/
+/.venv-qhop/
+/.pip-cache/
+/.pip-tmp/
+/Runs/
+/Logs/
+/Obj/
+/UserSettings/
+/Builds/
+*.csproj
+*.sln
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+/unity-import.log
