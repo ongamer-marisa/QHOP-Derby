@@ -15,3 +15,36 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 /unity-import.log
+
+# Local backups, editor state and credentials
+/backup/
+/.vs/
+/.idea/
+.env
+.env.*
+!.env.example
+
+# Local model/checkpoint outputs (publish approved models separately)
+*.pt
+*.pth
+*.onnx
+*.onnx.meta
+/Assets/Resources/QHopPolicyMetadata.json
+/Assets/Resources/QHopPolicyMetadata.json.meta
+
+# Python environment, build and tooling caches
+/.venv/
+/venv/
+/training/build/
+/training/dist/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS and editor temporary files
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.swp

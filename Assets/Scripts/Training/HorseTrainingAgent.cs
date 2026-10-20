@@ -35,7 +35,8 @@ namespace QHop
             if(Horse.Condition==HorseCondition.Standing && falls!=seenFalls)
             {history.Reset(frame);seenFalls=falls;}
             float[] observation=history.Build(frame,HorseTrainingObservation.TerrainGrid(Horse),
-                HorseTrainingObservation.OpponentData(Horse,Area.Horses,Area.Race.Results));
+                HorseTrainingObservation.OpponentData(Horse,Area.Horses,Area.Race.Results),
+                Horse.Gait.Observation(Horse.GaitTask,Area.TargetSpeed),Horse.Lidar.Data);
             if(observation.Length!=HorseTrainingObservation.Size)
                 throw new System.InvalidOperationException("Training observation schema mismatch");
             sensor.AddObservation(observation);

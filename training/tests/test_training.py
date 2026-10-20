@@ -13,8 +13,9 @@ import numpy as np
 from qhop_train.curriculum import (PHASES, difficulty, shaping,
                                    stage6_can_advance, stage6_final_ready,
                                    STAGE1_TASKS, REWARD_HASH, COURSE_HASH,
-                                   task, evaluation_interval, stage1_result)
-from qhop_train.schema import ACTION, FRAME, HISTORY, OBSERVATION, PHYSICS_FINGERPRINT, normalization_mask
+                                   task, evaluation_interval, stage1_result,
+                                   STAGE2_TASKS, stage2_result)
+from qhop_train.schema import ACTION, FRAME, HISTORY, OBSERVATION, LEGACY_OBSERVATION, GAIT, VERSION, PHYSICS_FINGERPRINT, normalization_mask, LIDAR_CONTRACT, RIG_CONTRACT, MODEL_ARCHITECTURE
 from qhop_train.control import (Session, StopRequested, approve, freeze_candidate,
                                 record_preview, request_stop, review_state)
 
@@ -34,9 +35,12 @@ class SchemaTests(unittest.TestCase):
                    data/"level0")
             hashes=[hashlib.sha256(path.read_bytes()).hexdigest() for path in files]
             player.with_suffix(".contract.json").write_text(json.dumps({
-                "schema_version":2,"observation_size":OBSERVATION,
+                "schema_version":VERSION,"observation_size":OBSERVATION,
                 "action_size":ACTION,"physics_fingerprint":PHYSICS_FINGERPRINT,
                 "reward_hash":REWARD_HASH,"course_hash":COURSE_HASH,
+                "lidar_contract":LIDAR_CONTRACT,
+                "rig_contract":RIG_CONTRACT,
+                "model_architecture":MODEL_ARCHITECTURE,
                 **dict(zip(("executable_sha256","assembly_sha256","resources_sha256",
                             "scene_sha256"),hashes))}))
             self.assertEqual(verify(player),hashlib.sha256("".join(hashes).encode()).hexdigest())
@@ -53,7 +57,7 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(constants["History"], HISTORY)
         self.assertEqual(constants["Terrain"], 70)
         self.assertEqual(constants["Opponent"], 12)
-        self.assertEqual(OBSERVATION, FRAME * HISTORY + 70 + 36)
+        self.assertEqual(OBSERVATION, FRAME * HISTORY + 70 + 36 + GAIT + 179)
         self.assertEqual(ACTION, 28)
         self.assertIn(f'PhysicsFingerprint="{PHYSICS_FINGERPRINT}"',source)
 
@@ -69,6 +73,10 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual([(row["distance"],row["timeLimit"])
                           for row in goals["stage1Tasks"]],
                          [(distance,seconds) for _,distance,seconds in STAGE1_TASKS])
+        self.assertEqual([(row["distance"],row["timeLimit"])
+                          for row in goals["stage2Tasks"]],
+                         [(distance,seconds) for _,distance,seconds in STAGE2_TASKS])
+        self.assertEqual(len(goals["stages"]),7)
 
     def test_binary_channels_untouched(self):
         mask = normalization_mask()
@@ -81,6 +89,11 @@ class SchemaTests(unittest.TestCase):
 
 
 class CurriculumTests(unittest.TestCase):
+    def test_stage1_transfer_is_disabled_for_r14(self):
+        from qhop_train.runner import load_stage1_transfer
+        with self.assertRaisesRegex(ValueError,"from scratch"):
+            load_stage1_transfer("old-checkpoint.pt",PPO("cpu"))
+
     def test_episode_summary_uses_eligible_meters_and_dnf_reason(self):
         from qhop_train.runner import episode_summary
         sample={"progress":2.0,"progressMeters":2.4,
@@ -94,17 +107,17 @@ class CurriculumTests(unittest.TestCase):
         self.assertEqual(summary["filtered_ground_m"],.5)
 
     def test_budgets_and_final_shaping(self):
-        self.assertEqual(sum(phase.budget for phase in PHASES), 63_000_000)
-        self.assertEqual([difficulty(3, v) for v in (0, .25, .5, .75)],
+        self.assertEqual(sum(phase.budget for phase in PHASES), 71_000_000)
+        self.assertEqual([difficulty(4, v) for v in (0, .25, .5, .75)],
                          [.25, .5, .75, 1.0])
-        self.assertEqual([shaping(6, v) for v in (0, .2, .4, .6, .8)],
+        self.assertEqual([shaping(7, v) for v in (0, .2, .4, .6, .8)],
                          [1.0, .75, .5, .25, 0.0])
 
     def test_stage1_short_tasks_and_final_review_gate(self):
         self.assertEqual([(distance,seconds) for _,distance,seconds in STAGE1_TASKS],
                          [(2,10),(5,15),(10,20),(20,20)])
         self.assertEqual(evaluation_interval(1),25)
-        self.assertEqual(evaluation_interval(2),100)
+        self.assertEqual(evaluation_interval(2),25)
         self.assertEqual(task(1,2)[1:],(10,20))
         self.assertEqual(stage1_result(0,{"completion":.79,"fall_free":1},0),(0,0,False))
         self.assertEqual(stage1_result(0,{"completion":.8,"fall_free":.6},0),(1,0,False))
@@ -114,6 +127,17 @@ class CurriculumTests(unittest.TestCase):
         self.assertEqual(stage1_result(3,{"completion":.9,"fall_free":.8},2),(3,3,True))
         self.assertEqual(stage1_result(3,{"completion":.89,"fall_free":.8},2),(3,0,False))
         self.assertLessEqual(6*25*16384,PHASES[0].budget)
+
+    def test_stage2_requires_correct_cycles_coverage_and_three_final_passes(self):
+        report={"episodes":100,"completion":.91,"fall_free":.91,"median_speed":7,
+                "gait_coverage":.91,"correct_cycle_ratio":.86,
+                "bad_cycle_ratio":.14,"synchrony_cycle_ratio":.04,"speed_band_fraction":.9,"high_hoof_fraction":.04}
+        self.assertEqual(stage2_result(0,report,0),(0,1,False))
+        self.assertEqual(stage2_result(0,report,1),(1,0,False))
+        self.assertEqual(stage2_result(1,report,1),(2,0,False))
+        self.assertEqual(stage2_result(2,report,2),(2,3,True))
+        self.assertEqual(stage2_result(2,{**report,"gait_coverage":.89},2),(2,0,False))
+        self.assertEqual(stage2_result(2,{**report,"synchrony_cycle_ratio":.06},2),(2,0,False))
 
     def test_stage6_requires_evaluation_and_final_training_span(self):
         budget=10_000_000
@@ -176,6 +200,35 @@ except ImportError:
 
 @unittest.skipIf(torch is None, "PyTorch not installed")
 class PPOTests(unittest.TestCase):
+    def test_status_failure_keeps_original_error_and_closes_workers(self):
+        from qhop_train import runner
+
+        with tempfile.TemporaryDirectory() as directory:
+            closed=[]
+            class FakeWorkers:
+                def __init__(self,*args,**kwargs):pass
+                def __enter__(self):return self
+                def __exit__(self,*args):closed.append(True)
+            original_publish=runner.Session.publish
+            failure=PermissionError(13,"sampling status busy",None,5)
+            def publish(session,status,**extra):
+                if status=="sampling":
+                    raise failure
+                if status=="failed":
+                    raise PermissionError(13,"failed status busy",None,5)
+                return original_publish(session,status,**extra)
+            with patch.object(runner,"UnityWorkers",FakeWorkers), \
+                 patch.object(runner,"_build_digest",return_value="test"), \
+                 patch.object(runner.Session,"publish",publish):
+                with self.assertRaises(PermissionError) as caught:
+                    runner.train("synthetic-player",directory,worker_count=1,
+                                 batch_size=128,max_updates=1)
+            self.assertIs(caught.exception,failure)
+            self.assertEqual(closed,[True])
+            saved=PPO("cpu")
+            payload=load(Path(directory)/"latest.pt",saved)
+            self.assertEqual(payload["training"]["global_updates"],0)
+
     def test_failed_partial_optimizer_update_keeps_last_complete_checkpoint(self):
         from qhop_train import runner
         with tempfile.TemporaryDirectory() as directory:
@@ -252,7 +305,10 @@ class PPOTests(unittest.TestCase):
                       "review":{"version":1,"status":"training"}}
             metadata={"batch":128,"workers":1,"seed":9,"unity_build":"test",
                       "physics_fingerprint":PHYSICS_FINGERPRINT,
-                      "reward_hash":REWARD_HASH,"course_hash":COURSE_HASH}
+                      "reward_hash":REWARD_HASH,"course_hash":COURSE_HASH,
+                "lidar_contract":LIDAR_CONTRACT,
+                "rig_contract":RIG_CONTRACT,
+                "model_architecture":MODEL_ARCHITECTURE}
             save(source,ppo,training,metadata)
             freeze_candidate(training,source,{"completion":1.0})
             save(latest,ppo,training,metadata)
@@ -307,7 +363,10 @@ class PPOTests(unittest.TestCase):
                "phase_steps":25*16384}
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/"stage1.pt"
-            save(path,ppo,state,{"reward_hash":REWARD_HASH,"course_hash":COURSE_HASH})
+            save(path,ppo,state,{"reward_hash":REWARD_HASH,"course_hash":COURSE_HASH,
+                "lidar_contract":LIDAR_CONTRACT,
+                "rig_contract":RIG_CONTRACT,
+                "model_architecture":MODEL_ARCHITECTURE})
             restored=PPO("cpu")
             payload=load(path,restored)
             self.assertEqual(payload["training"]["stage1_task_index"],1)
@@ -430,7 +489,7 @@ class PPOTests(unittest.TestCase):
         ppo=PPO("cpu")
         raw=torch.randn(4,OBSERVATION)
         expected=DeploymentActor(ppo.actor.eval(),ppo.normalizer.mean,
-                                 ppo.normalizer.var)(raw).detach().numpy()
+                                 ppo.normalizer.var)(raw,torch.zeros(4,128)).detach().numpy()
         with tempfile.TemporaryDirectory() as directory:
             source=Path(directory)/"checkpoint.pt"
             model=Path(directory)/"QHopPolicy.onnx"
@@ -438,7 +497,7 @@ class PPOTests(unittest.TestCase):
                                            "physics_fingerprint":PHYSICS_FINGERPRINT})
             export(source,model)
             session=ort.InferenceSession(str(model),providers=["CPUExecutionProvider"])
-            actual=session.run(["action"],{"observation":raw.numpy()})[0]
+            actual=session.run(["action"],{"observation":raw.numpy(),"hidden":np.zeros((4,128),np.float32)})[0]
             self.assertLess(float(np.max(np.abs(actual-expected))),1e-4)
 
     def test_export_rejects_old_physics_contract(self):

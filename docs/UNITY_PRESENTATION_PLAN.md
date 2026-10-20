@@ -1,5 +1,7 @@
 # Unity 4頭立てレース展示の実装・受け入れ計画
 
+> この文書は初版の展示範囲と受け入れ計画です。現行r14の7段階学習、転倒終端、2つのONNXの配備は[学習ガイド](../training/README.md)、実施済み検査は[検証記録](VALIDATION.md)を参照してください。
+
 [简体中文](UNITY_PRESENTATION_PLAN_cn.md) · [プロジェクト概要](../README.md)
 
 ## 確定した製品範囲

@@ -34,6 +34,8 @@ def main():
     parser.add_argument("--areas",type=int,default=8)
     parser.add_argument("--episodes",type=int,default=100)
     parser.add_argument("--diagnose",action="store_true")
+    parser.add_argument("--standing-only",action="store_true",
+                        help="Diagnose cold standing resets without preceding action-channel perturbations")
     args=parser.parse_args()
     started=time.perf_counter()
     terminals=0
@@ -42,7 +44,7 @@ def main():
     trace=[]
     with UnityWorkers(args.executable,1,1,0.0,1.0,20261003,args.areas,
                       worker_id_base=960) as workers:
-        for channel in range(ACTION):
+        for channel in range(0 if args.standing_only else ACTION):
             current=workers.current[0]
             actions=standing(len(current["learner"]["decision_id"]))
             expected=.1 if channel<16 else .6
@@ -86,8 +88,9 @@ def main():
                 decision_in_episode=0
                 if falls and not args.diagnose:
                     raise AssertionError(f"Standing reset stability failed: {falls} falls")
-    print({"checked_action_channels":ACTION,"completed_reset_episodes":terminals,
+    print({"checked_action_channels":0 if args.standing_only else ACTION,"completed_reset_episodes":terminals,
            "falls":falls,"wall_seconds":round(time.perf_counter()-started,1)})
+    if falls:raise AssertionError(f"Standing reset stability failed: {falls} falls")
 
 
 if __name__=="__main__":

@@ -18,11 +18,9 @@ namespace QHop
         sealed class MotorJoint
         {
             public ConfigurableJoint joint;
-            public Quaternion restRelativeRotation;
-            public int angleIndex;
-            public int strengthIndex;
-            public bool root;
-            public bool back;
+            public HorseJointDescriptor descriptor;
+            public int angleIndex,strengthIndex;
+            public bool root,back;
         }
 
         public int Id { get; private set; }
@@ -37,9 +35,12 @@ namespace QHop
         readonly Dictionary<string, Transform> bones = new Dictionary<string, Transform>();
         readonly Dictionary<string, Rigidbody> directBodies = new Dictionary<string, Rigidbody>();
         readonly List<FollowBone> follow = new List<FollowBone>();
+        public readonly List<HorseJointDescriptor> LegJoints=new List<HorseJointDescriptor>();
         readonly List<MotorJoint> motors = new List<MotorJoint>();
         readonly List<Collider> ownColliders = new List<Collider>();
         readonly Rigidbody[] hooves = new Rigidbody[4];
+        readonly float[] legLengths = new float[4];
+        readonly RaycastHit[] groundHits = new RaycastHit[16];
         readonly List<Vector3> restOffsets = new List<Vector3>();
         readonly List<Quaternion> restRotations = new List<Quaternion>();
         readonly bool[] hoofContact = new bool[4];
@@ -65,20 +66,45 @@ namespace QHop
         float restTorsoClearance;
         bool assistRecovery = true;
         bool trainingMode;
+        bool retired;
         Vector3 fallPosition;
         int physicsTick;
+        public readonly HorseGaitTracker Gait=new HorseGaitTracker();
+        public readonly HorseLidar Lidar=new HorseLidar();
+        public int GaitTask {get;set;}=-1;
         public bool ExternalActionMode { get; set; }
         public float FallWaitRemaining => Condition == HorseCondition.Fallen ? Mathf.Max(0f, 3f-conditionTimer) : 0f;
         public bool IsPolicyActive => Condition == HorseCondition.Standing || Condition == HorseCondition.Unstable;
         public IReadOnlyList<float> LastActionValues => lastAction.values;
         public bool[] HoofContact => hoofContact;
+        public Rigidbody[] Hooves => hooves;
         public bool TorsoGrounded => torsoOnGround;
         public float ConditionTimer => conditionTimer;
         public float RestTorsoHeight => restTorsoHeight;
+        public float RestTorsoClearance => restTorsoClearance;
+        public float LegLength(int leg) => legLengths[leg];
+        public float JointFlexion(int leg,int part)
+        {
+            return LegJoints[leg*4+part].Measured;
+        }
+        public float HoofClearance(int leg)
+        {
+            var hoof=hooves[leg];
+            Vector3 position=hoof.position;
+            int count=gameObject.scene.GetPhysicsScene().Raycast(position+Vector3.up*2f,
+                Vector3.down,groundHits,4f,Physics.DefaultRaycastLayers,
+                QueryTriggerInteraction.Ignore);
+            float ground=-.02f;
+            for(int i=0;i<count;i++)
+                if(groundHits[i].collider.GetComponentInParent<HorseGroundSurface>()!=null)
+                    ground=Mathf.Max(ground,groundHits[i].point.y);
+            return Mathf.Max(0f,hoof.GetComponent<Collider>().bounds.min.y-ground);
+        }
 
         public void Initialize(int id, HorseConfig config, GameObject horsePrefab, HorseRigDefinition definition,
             Material bodyMaterial, bool allowRecovery, bool training=false)
         {
+            Gait.Reset();
             Id = id;
             Config = config.Copy(); Config.Clamp();
             rig = definition;
@@ -131,6 +157,7 @@ namespace QHop
             visual.position += Vector3.forward * (transform.position.z - center.z);
 
             CreateBodies(renderer);
+            AlignHoofSupportPlane();
             float lowestHoof=float.MaxValue;
             foreach(var hoof in hooves)
                 lowestHoof=Mathf.Min(lowestHoof,hoof.GetComponent<Collider>().bounds.min.y);
@@ -150,6 +177,10 @@ namespace QHop
             if(!trainingMode)CreateBoneFollowers();
             else renderer.enabled=false;
             IgnoreSelfOverlap();
+            // Establish all targets and caps before the very first physics tick.
+            for(int i=HorseAction.AngleCount;i<HorseAction.Size;i++)lastAction.values[i]=.7f;
+            ApplyAction(lastAction);
+            Lidar.Reset(this);
         }
 
         void CreateOutline(SkinnedMeshRenderer source,int activeMorph)
@@ -217,8 +248,8 @@ namespace QHop
             rb.angularDamping=box?1.5f:.4f;
             rb.interpolation = RigidbodyInterpolation.Interpolate;
             rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-            rb.solverIterations = 16;
-            rb.solverVelocityIterations = 8;
+            rb.solverIterations = 64;
+            rb.solverVelocityIterations = 16;
             rb.maxAngularVelocity = 15f;
             if (box)
             {
@@ -239,6 +270,27 @@ namespace QHop
             return rb;
         }
 
+        void AlignHoofSupportPlane()
+        {
+            // Different front/rear lengths need a different whole-body ground pose.
+            // Rotate the assembly rigidly: joint rest rotations and limits stay unchanged.
+            var center=Torso.position;var positions=new Vector3[bodies.Count];var rotations=new Quaternion[bodies.Count];
+            for(int i=0;i<bodies.Count;i++){positions[i]=bodies[i].position;rotations[i]=bodies[i].rotation;}
+            float lo=-30f,hi=30f,angle=0f;var visualPosition=visual.position;var visualRotation=visual.rotation;
+            for(int iteration=0;iteration<18;iteration++)
+            {
+                angle=(lo+hi)*.5f;var rotation=Quaternion.AngleAxis(angle,Vector3.right);
+                for(int i=0;i<bodies.Count;i++)
+                {bodies[i].position=center+rotation*(positions[i]-center);bodies[i].rotation=rotation*rotations[i];}
+                Physics.SyncTransforms();
+                float front=(hooves[0].GetComponent<Collider>().bounds.min.y+hooves[1].GetComponent<Collider>().bounds.min.y)*.5f;
+                float back=(hooves[2].GetComponent<Collider>().bounds.min.y+hooves[3].GetComponent<Collider>().bounds.min.y)*.5f;
+                if(front>back)lo=angle;else hi=angle;
+            }
+            var final=Quaternion.AngleAxis(angle,Vector3.right);
+            visual.position=center+final*(visualPosition-center);visual.rotation=final*visualRotation;
+        }
+
         void CreateBodies(SkinnedMeshRenderer renderer)
         {
             Vector3 hip = bones["Pelvis"].position, chest = bones["Chest"].position;
@@ -247,6 +299,8 @@ namespace QHop
             Torso = NewBody("Torso", bodyCenter, Quaternion.identity, .60f, .34f * Config.bulk, bodyLength, true);
             var torsoCollider = Torso.GetComponent<BoxCollider>();
             torsoCollider.center = new Vector3(0f, .08f, 0f);
+            Torso.centerOfMass=new Vector3(0f,.08f,rig.torsoCenterOfMassForward*Config.bodyLength);
+            Torso.ResetInertiaTensor();
             directBodies["Base"] = Torso;
             directBodies["Pelvis"] = Torso;
             directBodies["Chest"] = Torso;
@@ -276,15 +330,13 @@ namespace QHop
                         delta.magnitude + (part == 3 ? .08f : 0f));
                     directBodies[chain[part]] = rb;
                     bool active = part < 3;
-                    var joint = Connect(rb, previous, start,
-                        part == 0 ? rig.swingLimit : part == 3 ? rig.hoofLimit : rig.hingeLimit, active);
-                    if (active)
-                    {
-                        motors.Add(new MotorJoint { joint = joint,
-                            restRelativeRotation = Quaternion.Inverse(previous.rotation) * rb.rotation,
-                            angleIndex = legId * 4 + (part == 0 ? 0 : part == 1 ? 2 : 3),
-                            strengthIndex = legId * 3 + part, root = part == 0, back = back });
-                    }
+                    var descriptor=rig.Describe(legId,part);
+                    float bodyA=descriptor.BodySign*descriptor.Min,bodyB=descriptor.BodySign*descriptor.Max;
+                    var joint=Connect(rb,previous,start,-Mathf.Min(bodyA,bodyB),Mathf.Max(bodyA,bodyB),descriptor.Side,active);
+                    descriptor.Bind(joint);LegJoints.Add(descriptor);
+                    if(active)motors.Add(new MotorJoint{joint=joint,descriptor=descriptor,
+                        angleIndex=legId*4+(part==0?0:part==1?2:3),strengthIndex=legId*3+part,
+                        root=part==0,back=back});
                     previous = rb;
                     if (part == 3)
                     {
@@ -301,6 +353,8 @@ namespace QHop
                     }
                 }
                 directBodies[chain[4]] = previous;
+                legLengths[legId]=Vector3.Distance(bones[chain[0]].position,
+                    hooves[legId].position);
             }
         }
 
@@ -312,7 +366,12 @@ namespace QHop
                 mass, radius, delta.magnitude);
         }
 
-        ConfigurableJoint Connect(Rigidbody body, Rigidbody parent, Vector3 anchor, float limit, bool active)
+        ConfigurableJoint Connect(Rigidbody body, Rigidbody parent, Vector3 anchor,
+            float limit, bool active)
+        { return Connect(body,parent,anchor,limit,limit,limit,active); }
+
+        ConfigurableJoint Connect(Rigidbody body, Rigidbody parent, Vector3 anchor,
+            float negativeLimit, float positiveLimit, float sideLimit, bool active)
         {
             var joint = body.gameObject.AddComponent<ConfigurableJoint>();
             joint.connectedBody = parent;
@@ -321,10 +380,12 @@ namespace QHop
             joint.connectedAnchor = parent.transform.InverseTransformPoint(anchor);
             joint.xMotion = joint.yMotion = joint.zMotion = ConfigurableJointMotion.Locked;
             joint.angularXMotion = joint.angularYMotion = joint.angularZMotion = ConfigurableJointMotion.Limited;
-            joint.lowAngularXLimit = new SoftJointLimit { limit = -limit };
-            joint.highAngularXLimit = new SoftJointLimit { limit = limit };
-            joint.angularYLimit = new SoftJointLimit { limit = active ? rig.sideLimit : limit };
-            joint.angularZLimit = new SoftJointLimit { limit = active ? rig.sideLimit : limit };
+            joint.axis=body.transform.InverseTransformDirection(Vector3.right);
+            joint.secondaryAxis=body.transform.InverseTransformDirection(Vector3.up);
+            joint.lowAngularXLimit = new SoftJointLimit { limit = -positiveLimit };
+            joint.highAngularXLimit = new SoftJointLimit { limit = negativeLimit };
+            joint.angularYLimit = new SoftJointLimit { limit = sideLimit };
+            joint.angularZLimit = new SoftJointLimit { limit = sideLimit };
             joint.rotationDriveMode = RotationDriveMode.Slerp;
             joint.slerpDrive = new JointDrive
             {
@@ -381,7 +442,7 @@ namespace QHop
 
         public void FixedStep(IReadOnlyList<HorseActor> opponents, bool running)
         {
-            if (Torso == null || !running) return;
+            if (Torso == null || !running || retired) return;
             if (!ExternalActionMode && physicsTick % 5 == 0 && IsPolicyActive)
             {
                 HorseAction action = controller.Decide(BuildObservation(opponents));
@@ -389,6 +450,7 @@ namespace QHop
                 else { lastAction = action; ApplyAction(action); }
             }
             physicsTick++;
+            Lidar.Step(this);
             UpdateFall();
             for (int i = 0; i < 4; i++)
             {
@@ -401,6 +463,7 @@ namespace QHop
                     Emit(HorseEventType.Slip,hooves[i].position,slip.magnitude);
                 }
             }
+            Gait.Step(this,Time.fixedDeltaTime,GaitTask);
         }
         public bool SetExternalAction(HorseAction action)
         {
@@ -416,14 +479,7 @@ namespace QHop
             {
                 float primary = action.values[motor.angleIndex];
                 float side = motor.root ? action.values[motor.angleIndex + 1] : 0f;
-                float range = motor.root ? rig.swingLimit : rig.hingeLimit;
-                Quaternion desired = motor.restRelativeRotation *
-                    Quaternion.Euler(primary * range, 0f, side * rig.sideLimit);
-                Vector3 axis = motor.joint.axis.normalized;
-                Vector3 secondary = Vector3.ProjectOnPlane(motor.joint.secondaryAxis, axis).normalized;
-                Quaternion jointSpace = Quaternion.LookRotation(Vector3.Cross(axis, secondary), secondary);
-                motor.joint.targetRotation = Quaternion.Inverse(jointSpace) *
-                    Quaternion.Inverse(desired) * motor.restRelativeRotation * jointSpace;
+                motor.descriptor.Drive(motor.descriptor.ActionAngle(primary),side);
                 float power = (action.values[HorseAction.AngleCount + motor.strengthIndex] + 1f) * .5f;
                 if(Condition==HorseCondition.Fallen)power*=.25f;
                 var drive = motor.joint.slerpDrive;
@@ -545,6 +601,7 @@ namespace QHop
                 lastAction=new HorseAction();
                 for(int i=HorseAction.AngleCount;i<HorseAction.Size;i++)lastAction.values[i]=.7f;
                 ApplyAction(lastAction);
+                Lidar.Reset(this);
                 Emit(HorseEventType.Recovery, query, 1f);
             }
         }
@@ -581,6 +638,7 @@ namespace QHop
         }
         public void RetireFromRace()
         {
+            retired=true;
             foreach (var body in bodies)
             {
                 body.linearVelocity=Vector3.zero;
@@ -605,6 +663,7 @@ namespace QHop
         }
         void OnDestroy()
         {
+            Lidar.Dispose();
             if(uniqueMesh!=null)Destroy(uniqueMesh);
             if(uniqueBodyMaterial!=null)Destroy(uniqueBodyMaterial);
             if(uniqueOutlineMaterial!=null)Destroy(uniqueOutlineMaterial);

@@ -55,7 +55,7 @@ def benchmark(executable, stage, seconds, seed):
     import psutil
 
     results = []
-    total_areas = 32 if stage < 5 else 8
+    total_areas = 32 if stage < 6 else 8
     for count in (1, 2, 4):
         arenas = total_areas // count
         with UnityWorkers(executable, count, stage, 1.0, 0.0, seed, arenas,
@@ -97,14 +97,15 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor")
     bench = sub.add_parser("benchmark")
-    bench.add_argument("--stage", type=int, choices=range(1, 7), default=1)
+    bench.add_argument("--stage", type=int, choices=range(1, 8), default=1)
     bench.add_argument("--seconds", type=float, default=20)
     bench.add_argument("--seed", type=int, default=20260927)
     for name in ("train", "resume", "finetune"):
         command = sub.add_parser(name)
         command.add_argument("--output", type=Path, required=True)
         command.add_argument("--checkpoint", type=Path, required=name != "train")
-        command.add_argument("--stage", type=int, choices=range(1, 7), default=1)
+        command.add_argument("--stage", type=int, choices=range(1, 8), default=1)
+        command.add_argument("--device",choices=("auto","cpu","cuda"),default="auto")
         command.add_argument("--workers", type=int, default=4)
         command.add_argument("--batch", type=int, default=16384)
         command.add_argument("--max-updates", type=int, default=None,
@@ -112,9 +113,26 @@ def main(argv=None):
         command.add_argument("--seed", type=int, default=20260927)
         command.add_argument("--extra-steps", type=int, default=0,
                              help="Extend an unfinished stage when resuming; LR remains at its floor")
+    transfer_parser=sub.add_parser("transfer-stage1")
+    transfer_parser.add_argument("--output",type=Path,required=True)
+    transfer_parser.add_argument("--checkpoint",type=Path,default=
+        Path(__file__).resolve().parents[2]/"backup/step-00000275-stage1-last.pt")
+    transfer_parser.add_argument("--workers",type=int,default=4)
+    transfer_parser.add_argument("--batch",type=int,default=16384)
+    transfer_parser.add_argument("--seed",type=int,default=20260927)
+    transfer_parser.add_argument("--max-updates",type=int)
+    adapt_parser=sub.add_parser("adapt-gait")
+    adapt_parser.add_argument("--checkpoint",type=Path,required=True)
+    adapt_parser.add_argument("--output",type=Path,required=True)
+    adapt_parser.add_argument("--device",choices=("auto","cpu","cuda"),default="auto")
+    adapt_parser.add_argument("--workers",type=int,default=4)
+    adapt_parser.add_argument("--batch",type=int,default=16384)
+    adapt_parser.add_argument("--seed",type=int,default=20260927)
+    adapt_parser.add_argument("--max-updates",type=int)
+    adapt_parser.add_argument("--eval-interval",type=int,default=10)
     evaluate_parser = sub.add_parser("evaluate")
     evaluate_parser.add_argument("--checkpoint", type=Path, required=True)
-    evaluate_parser.add_argument("--stage", type=int, choices=range(1, 7), required=True)
+    evaluate_parser.add_argument("--stage", type=int, choices=range(1, 8), required=True)
     evaluate_parser.add_argument("--races", type=int, default=100)
     evaluate_parser.add_argument("--seed", type=int, default=72500)
     export_parser = sub.add_parser("export")
@@ -127,6 +145,8 @@ def main(argv=None):
     preview_parser.add_argument("--checkpoint", type=Path, required=True)
     preview_parser.add_argument("--output", type=Path, required=True)
     preview_parser.add_argument("--seed", type=int, default=92500)
+    preview_parser.add_argument("--task-index", type=int, choices=range(3),
+                                help="Inspect a Stage 2 gait task without changing its checkpoint")
     preview_parser.add_argument("--max-episodes", type=int)
     preview_parser.add_argument("--max-seconds", type=float,
                                 help="Short environment-launch smoke test only")
@@ -157,7 +177,19 @@ def main(argv=None):
               resume=args.checkpoint if args.command == "resume" else None,
               finetune=args.checkpoint if args.command == "finetune" else None,
               initial_stage=args.stage, batch_size=args.batch,
-              extra_steps=args.extra_steps,max_updates=args.max_updates)
+              extra_steps=args.extra_steps,max_updates=args.max_updates,device=args.device)
+        return 0
+    if args.command=="adapt-gait":
+        from .runner import train
+        train(args.executable,args.output,adapt_gait=args.checkpoint,initial_stage=2,
+              seed=args.seed,worker_count=args.workers,batch_size=args.batch,
+              max_updates=args.max_updates,eval_interval=args.eval_interval,device=args.device)
+        return 0
+    if args.command=="transfer-stage1":
+        from .runner import train
+        train(args.executable,args.output,transfer=args.checkpoint,initial_stage=2,
+              seed=args.seed,worker_count=args.workers,batch_size=args.batch,
+              max_updates=args.max_updates)
         return 0
     if args.command == "checkpoint-info":
         from .review import checkpoint_info
@@ -167,7 +199,8 @@ def main(argv=None):
         from .preview import preview
         print(json.dumps(preview(args.executable, args.checkpoint, args.output,
                                  seed=args.seed, max_episodes=args.max_episodes,
-                                 max_seconds=args.max_seconds),
+                                 max_seconds=args.max_seconds,
+                                 task_override=args.task_index),
                          indent=2, ensure_ascii=False))
         return 0
     if args.command == "approve-stage":
@@ -204,7 +237,8 @@ def main(argv=None):
                 source.get("reward_hash")!=REWARD_HASH or \
                 source.get("course_hash")!=COURSE_HASH:
             raise ValueError("Checkpoint Unity, reward, or curriculum contract differs")
-        task_index=payload["training"].get("stage1_task_index",3) if args.stage==1 else 0
+        task_index=payload["training"].get("stage1_task_index",3) if args.stage==1 else \
+            payload["training"].get("stage2_task_index",2) if args.stage==2 else 0
         report = evaluate(ppo, args.executable, args.stage, seed=args.seed,
                           races=args.races, difficulty_level=1.0, shaping_level=0.0,
                           opponent_paths=payload["training"].get("opponents", []),

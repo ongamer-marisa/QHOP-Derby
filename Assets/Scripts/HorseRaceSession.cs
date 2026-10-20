@@ -6,6 +6,7 @@ namespace QHop
 {
     public sealed class HorseRaceResult
     {
+        public bool distanceReached;
         public bool finished;
         public bool dnf;
         public float finishTime;
@@ -26,16 +27,19 @@ namespace QHop
         readonly IReadOnlyList<HorseActor> horses;
         readonly HorseRaceResult[] results;
         readonly float distance, timeout;
+        readonly bool fixedWindow;
+        readonly bool fallTerminatesEpisode;
         int nextRank=1;
         public float Elapsed { get; private set; }
         public IReadOnlyList<HorseRaceResult> Results => results;
         public bool Complete { get; private set; }
 
-        public HorseRaceSession(IReadOnlyList<HorseActor> horses, float distance, float timeout)
+        public HorseRaceSession(IReadOnlyList<HorseActor> horses, float distance, float timeout,bool fixedWindow=false,bool fallTerminatesEpisode=false)
         {
             this.horses=horses;
             this.distance=distance;
-            this.timeout=timeout;
+            this.timeout=timeout;this.fixedWindow=fixedWindow;
+            this.fallTerminatesEpisode=fallTerminatesEpisode;
             results=new HorseRaceResult[horses.Count];
             for(int i=0;i<horses.Count;i++)
                 results[i]=new HorseRaceResult { previousZ=horses[i].Torso.position.z,
@@ -63,6 +67,13 @@ namespace QHop
                 if(!valid)throw new InvalidOperationException("Non-finite horse physics state: "+i);
                 if(result.previousCondition!=HorseCondition.Fallen && horse.Condition==HorseCondition.Fallen)
                     result.falls++;
+                if(fallTerminatesEpisode && horse.Condition==HorseCondition.Fallen)
+                {
+                    result.dnf=true;result.reason="fall";
+                    result.previousCondition=horse.Condition;
+                    horse.RetireFromRace();settlementChanged=true;
+                    continue;
+                }
                 bool active=horse.IsPolicyActive && !horse.Torso.IsSleeping();
                 bool upright=Vector3.Dot(horse.Torso.transform.up,Vector3.up)>.55f &&
                     p.y>horse.RestTorsoHeight*.65f;
@@ -87,24 +98,25 @@ namespace QHop
                     }
                     result.highWater=p.z;
                 }
-                if(active && upright && !horse.TorsoGrounded && Mathf.Abs(p.x)<=6f &&
+                if(!result.distanceReached && active && upright && !horse.TorsoGrounded && Mathf.Abs(p.x)<=6f &&
                     result.previousZ<distance && p.z>=distance &&
                     horse.Torso.linearVelocity.z>0f)
                 {
                     float fraction=Mathf.Clamp01((distance-result.previousZ)/Mathf.Max(1e-6f,p.z-result.previousZ));
-                    result.finished=true;result.finishTime=before+fraction*dt;
-                    newlyFinished.Add(i);
-                    settlementChanged=true;
-                    horse.RetireFromRace();
+                    result.distanceReached=true;result.finishTime=before+fraction*dt;
+                    if(!fixedWindow)
+                    {result.finished=true;newlyFinished.Add(i);settlementChanged=true;horse.RetireFromRace();}
                 }
-                else if(Mathf.Abs(p.x)>8f || p.y<-.5f || Elapsed>=timeout)
+                if(!result.finished && (Mathf.Abs(p.x)>8f || p.y<-.5f || Elapsed>=timeout))
                 {
-                    result.dnf=true;
+                    if(fixedWindow && Elapsed>=timeout && Mathf.Abs(p.x)<=8f && p.y>=-.5f && result.distanceReached)
+                    {result.finished=true;newlyFinished.Add(i);result.finishTime=Elapsed;}
+                    else result.dnf=true;
                     settlementChanged=true;
-                    result.reason=Mathf.Abs(p.x)>8f?"boundary":p.y<-.5f?"ground":"timeout";
+                    result.reason=result.dnf?(Mathf.Abs(p.x)>8f?"boundary":p.y<-.5f?"ground":"timeout"):null;
                     horse.RetireFromRace();
                 }
-                else remaining++;
+                else if(!result.finished)remaining++;
                 result.previousZ=p.z;
                 result.previousCondition=horse.Condition;
             }

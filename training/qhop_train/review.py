@@ -27,7 +27,8 @@ def _sync_status(directory, state, status):
                  phase_steps=state.get("phase_steps", 0),
                  updates=state.get("global_updates", 0),
                  passes=state.get("passes", 0), review=state["review"],
-                 task_index=state.get("stage1_task_index",0),
+                 task_index=state.get("stage1_task_index",0) if state.get("stage")==1
+                     else state.get("stage2_task_index",0) if state.get("stage")==2 else 0,
                  recent100=state.get("recent_episodes_summary",{}),
                  approvals=state.get("approvals", []))
     atomic_json(path, value)
@@ -45,7 +46,8 @@ def checkpoint_info(path):
             "updates": state.get("global_updates", 0),
             "global_steps": state.get("global_steps", 0),
             "learning_rate": ppo.schedule.rate(),
-            "task_index": state.get("stage1_task_index",0),
+            "task_index": state.get("stage1_task_index",0) if state.get("stage")==1
+                else state.get("stage2_task_index",0) if state.get("stage")==2 else 0,
             "reward_hash": payload.get("metadata",{}).get("reward_hash"),
             "course_hash": payload.get("metadata",{}).get("course_hash"),
             "review": review_state(state),
@@ -84,11 +86,11 @@ def approve_stage(directory):
     stage = state["stage"]
     state.setdefault("approvals", []).append({"stage": stage, **dict(review)})
     checkpoint.save(directory / f"stage{stage}-approved.pt", ppo, state, metadata)
-    if stage == 4:
-        state["opponents"] = [str(directory / "stage4-approved.pt")]
     if stage == 5:
-        state["stage5_baseline"] = review["report"]
+        state["opponents"] = [str(directory / "stage5-approved.pt")]
     if stage == 6:
+        state["stage6_baseline"] = review["report"]
+    if stage == 7:
         checkpoint.save(directory / "final.pt", ppo, state, metadata)
         checkpoint.save(directory / "latest.pt", ppo, state, metadata)
         _sync_status(directory, state, "completed")
@@ -97,11 +99,19 @@ def approve_stage(directory):
     state["phase_steps"] = 0
     state["phase_budget_extension"] = 0
     state["passes"] = 0
-    if state["stage"] == 6:
+    if state["stage"] == 7:
         state["shaping_index"] = 0
         state["shaping_level_start"] = 0
     phase = PHASES[state["stage"] - 1]
-    ppo.reset_phase(phase.peak_lr, phase.updates(metadata["batch"]))
+    if stage==1:
+        from .ppo import PPO
+        fresh=PPO(ppo.device,phase.peak_lr,phase.updates(metadata["batch"]))
+        fresh.actor.load_state_dict(ppo.actor.state_dict())
+        fresh.normalizer.load_state_dict(ppo.normalizer.state_dict())
+        ppo=fresh
+        state["gait_warmup"]=True
+    else:
+        ppo.reset_phase(phase.peak_lr, phase.updates(metadata["batch"]))
     state["review"] = {"version": 1, "status": "training",
                        "previous_approval": dict(review)}
     checkpoint.save(directory / "latest.pt", ppo, state, metadata)

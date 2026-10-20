@@ -1,6 +1,5 @@
 """Atomic checkpoint save and exact optimizer/scheduler restoration."""
 from pathlib import Path
-import os
 import random
 import tempfile
 
@@ -8,6 +7,7 @@ import numpy as np
 import torch
 
 from .schema import VERSION
+from .atomic_io import cleanup_temporary, replace_with_retry
 
 
 def capture_rng():
@@ -32,6 +32,7 @@ def save(path, ppo, training_state, metadata):
     payload = {
         "schema_version": VERSION,
         "actor": ppo.actor.state_dict(), "critic": ppo.critic.state_dict(),
+        "vision": ppo.vision.state_dict(),
         "optimizer": ppo.optimizer.state_dict(), "schedule": ppo.schedule.state_dict(),
         "normalizer": ppo.normalizer.state_dict(), "rng": capture_rng(),
         "training": training_state, "metadata": metadata,
@@ -41,17 +42,19 @@ def save(path, ppo, training_state, metadata):
         temporary = Path(handle.name)
     try:
         torch.save(payload, temporary)
-        os.replace(temporary, destination)
+        replace_with_retry(temporary, destination)
     finally:
-        temporary.unlink(missing_ok=True)
+        cleanup_temporary(temporary)
 
 
 def load(path, ppo, *, weights_only=False):
     payload = torch.load(path, map_location=ppo.device, weights_only=False)
     if payload["schema_version"] != VERSION:
-        raise ValueError("Observation schema version mismatch")
+        raise ValueError("Old checkpoint is incompatible with r14 LiDAR/GRU/fall termination; start a new experiment")
     ppo.actor.load_state_dict(payload["actor"])
     ppo.critic.load_state_dict(payload["critic"])
+    ppo.vision.load_state_dict(payload["vision"])
+    ppo.vision_states.clear()
     ppo.normalizer.load_state_dict(payload["normalizer"])
     if not weights_only:
         ppo.optimizer.load_state_dict(payload["optimizer"])

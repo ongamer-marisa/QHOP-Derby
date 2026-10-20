@@ -1,5 +1,7 @@
 """One spawned Python process per headless Unity simulator."""
 import multiprocessing as mp
+import os
+import math
 from pathlib import Path
 import time
 
@@ -26,6 +28,8 @@ def _one(env, behavior):
     final_observations = terminal.obs[0].astype(np.float32).copy()
     if observations.shape[1:] != (OBSERVATION,) or final_observations.shape[1:] != (OBSERVATION,):
         raise ValueError("Unity observation schema mismatch")
+    if not np.isfinite(observations).all() or not np.isfinite(final_observations).all() or not np.isfinite(decision.reward).all() or not np.isfinite(terminal.reward).all():
+        raise ValueError("Non-finite Unity observation or reward")
     return {
         "decision_id": decision.agent_id.copy(),
         "decision_obs": observations,
@@ -56,6 +60,12 @@ def _worker(pipe, executable, worker_id, stage, difficulty, shaping, seed, areas
     from .curriculum import task
     from .episode_channel import EpisodeChannel
 
+    from mlagents_envs.side_channel.engine_configuration_channel import EngineConfigurationChannel
+    engine=EngineConfigurationChannel()
+    scale=float(os.environ.get("QHOP_TRAIN_TIME_SCALE","1"))
+    if not math.isfinite(scale) or not 1<=scale<=20:
+        raise ValueError("QHOP_TRAIN_TIME_SCALE must be within [1,20]")
+    engine.set_configuration_parameters(time_scale=scale,target_frame_rate=-1)
     channel = EpisodeChannel()
     _, distance, time_limit = task(stage, task_index)
     log_dir=Path(log_dir) if log_dir is not None else Path(executable).resolve().parent / "worker-logs"
@@ -65,11 +75,13 @@ def _worker(pipe, executable, worker_id, stage, difficulty, shaping, seed, areas
             f"--qhop-task-index={task_index}",f"--qhop-distance={distance}",
             f"--qhop-time-limit={time_limit}",
             "-logFile",str(log_dir / f"worker-{worker_id}.log")]
+    if os.environ.get("QHOP_PHYSICS_TRACE")=="1":args.append("--qhop-physics-trace")
+    if os.environ.get("QHOP_VALIDATE_MORPH")=="1":args.append("--qhop-validation-morph")
     env = None
     try:
         env = UnityEnvironment(file_name=str(executable), worker_id=worker_id,
                                seed=seed, no_graphics=True, additional_args=args,
-                               side_channels=[channel], timeout_wait=120)
+                               side_channels=[channel,engine], timeout_wait=120)
         env.reset()
         initial=_snapshot(env)
         initial["episode_logs"]=channel.drain()

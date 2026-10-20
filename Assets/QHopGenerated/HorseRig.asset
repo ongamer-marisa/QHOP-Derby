@@ -11,10 +11,11 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 02b0cedc6d1dd9348a18bab6b6e85e80, type: 3}
   m_Name: HorseRig
-  m_EditorClassIdentifier: 
+  m_EditorClassIdentifier:
   referenceShoulderHeight: 1.5
+  torsoCenterOfMassForward: 0.2
   rootDrive: 40000
-  jointSpring: 60000
+  jointSpring: 240000
   jointDamper: 3000
   passiveSpring: 5000
   passiveDamper: 350
@@ -22,6 +23,25 @@ MonoBehaviour:
   sideLimit: 20
   hingeLimit: 75
   hoofLimit: 30
+  frontBackSwing: 45
+  frontForwardSwing: 55
+  backBackSwing: 55
+  backForwardSwing: 45
+  rootSideLimit: 12
+  reverseFlexLimit: 8
+  hingeSideLimit: 6
+  hoofSideLimit: 8
+  frontMiddleFlex: 75
+  frontLowerFlex: 100
+  backMiddleFlex: 60
+  backLowerFlex: 65
+  frontMiddleSoft: 60
+  frontLowerSoft: 85
+  backMiddleSoft: 45
+  backLowerSoft: 50
+  reverseSoftLimit: 3
+  rootTwistLimit: 8
+  hingeTwistLimit: 10
   frontLeft:
   - ForeThigh.L
   - ForeThigh.L.001

@@ -4,6 +4,7 @@ import json
 import uuid
 
 from mlagents_envs.side_channel.side_channel import SideChannel
+from mlagents_envs.side_channel.outgoing_message import OutgoingMessage
 
 
 CHANNEL_ID = uuid.UUID("4ed887c2-8036-4d8c-b112-07915209a1c4")
@@ -24,3 +25,8 @@ class EpisodeChannel(SideChannel):
         result = list(self.events)
         self.events.clear()
         return result
+
+    def vision_debug(self,counts):
+        if not counts:return
+        msg=OutgoingMessage();msg.write_string(json.dumps({'kind':'vision_debug','minimum':min(counts),'maximum':max(counts)}))
+        self.queue_message_to_send(msg)

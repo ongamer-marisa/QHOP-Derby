@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Text;
 using System.Threading;
 using UnityEditor;
 using UnityEngine;
@@ -12,6 +13,15 @@ public static class QHopTrainingMenuProbe
     {
         public string status;
         public int updates;
+    }
+    static Status ReadStatus(string path)
+    {
+        string text;
+        using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,
+            FileShare.ReadWrite|FileShare.Delete))
+        using(var reader=new StreamReader(stream,Encoding.UTF8,true))
+            text=reader.ReadToEnd();
+        return JsonUtility.FromJson<Status>(text);
     }
     public static void Run()
     {
@@ -40,7 +50,7 @@ public static class QHopTrainingMenuProbe
         {
             Thread.Sleep(250);
             if(!File.Exists(statusPath))continue;
-            var current=JsonUtility.FromJson<Status>(File.ReadAllText(statusPath));
+            var current=ReadStatus(statusPath);
             if(current.status=="sampling"){sampling=true;break;}
             if(current.status=="failed")break;
         }
@@ -49,7 +59,7 @@ public static class QHopTrainingMenuProbe
         for(int i=0;i<240;i++)
         {
             Thread.Sleep(250);
-            var current=JsonUtility.FromJson<Status>(File.ReadAllText(statusPath));
+            var current=ReadStatus(statusPath);
             if(current.status=="stopped")
             {
                 if(!File.Exists(Path.Combine(directory,"latest.pt")))

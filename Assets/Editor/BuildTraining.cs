@@ -16,6 +16,7 @@ public static class BuildTraining
         public int schema_version,observation_size,action_size;
         public string physics_fingerprint,reward_hash,course_hash,
             executable_sha256,assembly_sha256,resources_sha256,scene_sha256;
+        public string lidar_contract,rig_contract,model_architecture;
     }
 
     const string ScenePath="Assets/Scenes/QHopTraining.unity";
@@ -32,6 +33,9 @@ public static class BuildTraining
     [MenuItem("QHOP/Build training environment")]
     public static void Build()
     {
+        const string debugMaterial="Assets/Resources/QHopLidarDebug.mat";
+        if(AssetDatabase.LoadAssetAtPath<Material>(debugMaterial)==null)
+            AssetDatabase.CreateAsset(new Material(Shader.Find("Sprites/Default")),debugMaterial);
         Generate();
         System.IO.Directory.CreateDirectory("Builds/Training");
         var report=BuildPipeline.BuildPlayer(new BuildPlayerOptions
@@ -62,6 +66,9 @@ public static class BuildTraining
                 schema_version=HorseTrainingObservation.Version,
                 observation_size=HorseTrainingObservation.Size,
                 action_size=HorseAction.Size,
+                lidar_contract=HorseLidar.Contract,
+                rig_contract=HorseRigDefinition.Contract,
+                model_architecture="grouped-mlp-shared-lidar-gru-r14",
                 physics_fingerprint=HorseTrainingObservation.PhysicsFingerprint,
                 reward_hash=TextDigest(HorseTrainingReward.Contract),
                 course_hash=TextDigest(HorseTrainingArea.CourseContract),

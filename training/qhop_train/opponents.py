@@ -8,6 +8,7 @@ import torch
 from .checkpoint import load
 from .ppo import PPO
 from .schema import ACTION, PHYSICS_FINGERPRINT
+from .vision_state import VisionStates
 
 
 class FrozenPolicies:
@@ -16,6 +17,7 @@ class FrozenPolicies:
         self.fallback = fallback_ppo
         self.cache = {}
         self.assignment = {}
+        self.memories = {}
         self.random = random.Random(seed)
 
     def _policy(self, path):
@@ -40,12 +42,20 @@ class FrozenPolicies:
             groups[self.assignment[key]].append(index)
         for path, indices in groups.items():
             policy = self._policy(path)
+            if path not in self.memories:self.memories[path]=VisionStates(policy.vision,policy.device)
             normalized = policy.normalizer.normalize(raw[indices])
             with torch.no_grad():
                 tensor = torch.as_tensor(normalized, device=policy.device)
-                actions[indices] = policy.actor(tensor).cpu().numpy()
+                memory=torch.cat([self.memories[path].consume((worker,int(ids[i])),raw[i])[0] for i in indices])
+                actions[indices] = policy.actor(tensor,memory).cpu().numpy()
         return actions
 
     def terminal(self, worker, ids):
         for agent_id in ids:
+            key=(worker,int(agent_id))
+            path=self.assignment.get(key)
+            if path in self.memories:self.memories[path].terminal(key)
             self.assignment.pop((worker, int(agent_id)), None)
+
+    def refresh(self):
+        for bank in self.memories.values():bank.refresh()

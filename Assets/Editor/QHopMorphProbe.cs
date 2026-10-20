@@ -1,6 +1,9 @@
 using System;
 using QHop;
 using UnityEngine;
+using UnityEngine.SceneManagement;
+using UnityEditor.SceneManagement;
+using UnityEditor;
 
 // Run with Unity -batchmode -nographics -executeMethod QHopMorphProbe.Run.
 public static class QHopMorphProbe
@@ -14,12 +17,21 @@ public static class QHopMorphProbe
     {
         var prefab=Resources.Load<GameObject>("HorseGame");
         Check(prefab!=null,"HorseGame prefab missing");
-        var rig=ScriptableObject.CreateInstance<HorseRigDefinition>();
+        var rig=AssetDatabase.LoadAssetAtPath<HorseRigDefinition>("Assets/QHopGenerated/HorseRig.asset");
+        Check(rig!=null,"loaded rig missing");
         var shader=Shader.Find("Standard");
         Check(shader!=null,"Standard shader missing");
         var material=new Material(shader);
+        var oldScene=SceneManager.GetActiveScene();
+        var mode=Physics.simulationMode;float oldDt=Time.fixedDeltaTime;
+        var scene=EditorSceneManager.NewPreviewScene();
+        Physics.simulationMode=SimulationMode.Script;Time.fixedDeltaTime=.01f;
         try
         {
+            var physics=scene.GetPhysicsScene();
+            var ground=GameObject.CreatePrimitive(PrimitiveType.Cube);
+            SceneManager.MoveGameObjectToScene(ground,scene);ground.transform.position=new Vector3(0,-.12f,0);
+            ground.transform.localScale=new Vector3(20f,.2f,20f);ground.AddComponent<HorseGroundSurface>();
             const float tolerance=.001f;
             float[] scales={.85f,1f,1.15f};
             int checkedMorphologies=0;
@@ -36,6 +48,7 @@ public static class QHopMorphProbe
                     massKg=Mathf.Clamp(450f*bulk*bulk*length,250f,750f)
                 };
                 var root=new GameObject("MorphProbe_"+checkedMorphologies);
+                SceneManager.MoveGameObjectToScene(root,scene);
                 try
                 {
                     var horse=root.AddComponent<HorseActor>();
@@ -61,10 +74,21 @@ public static class QHopMorphProbe
                     }
                     Check(Mathf.Abs(lowest+.02f)<tolerance,
                           "hoof does not meet ground "+checkedMorphologies+": "+lowest);
+                    horse.ExternalActionMode=true;
+                    var action=new HorseAction();for(int channel=16;channel<28;channel++)action.values[channel]=.7f;
+                    horse.ApplyAction(action);Physics.SyncTransforms();
+                    for(int tick=0;tick<100;tick++)
+                    {
+                        physics.Simulate(.01f);horse.FixedStep(new[]{horse},true);
+                        foreach(var body in horse.bodies)
+                            Check(float.IsFinite(body.position.sqrMagnitude),"nonfinite loaded morphology "+checkedMorphologies);
+                    }
+                    Check(horse.Condition!=HorseCondition.Fallen,"loaded morphology fell "+checkedMorphologies);
                     checkedMorphologies++;
                 }
                 finally{UnityEngine.Object.DestroyImmediate(root);}
             }
+            UnityEngine.Object.DestroyImmediate(ground);
             for(int seed=0;seed<1000;seed++)
             {
                 var config=HorseGenetics.Generate(seed);
@@ -76,12 +100,13 @@ public static class QHopMorphProbe
                       Mathf.Abs(config.frontLength-config.backLength)<=.2f+
                       tolerance,"generator range "+seed);
             }
-            Debug.Log("QHOP_MORPH_PROBE_PASS: 81 rigs, 1000 genetic samples, hoof y=-0.02");
+            Debug.Log("QHOP_MORPH_PROBE_PASS: 81 loaded rigs, 1000 genetic samples, hoof y=-0.02");
         }
         finally
         {
+            EditorSceneManager.ClosePreviewScene(scene);
+            Physics.simulationMode=mode;Time.fixedDeltaTime=oldDt;
             UnityEngine.Object.DestroyImmediate(material);
-            UnityEngine.Object.DestroyImmediate(rig);
         }
     }
 }

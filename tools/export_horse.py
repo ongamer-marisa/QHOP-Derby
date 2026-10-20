@@ -7,15 +7,12 @@ import bpy
 from pathlib import Path
 
 project = Path(__file__).resolve().parents[1]
-source = Path(r"C:\Users\20941\Downloads\Low Poly Rigged Horse Model for Video Games.zip")
-import zipfile
-with zipfile.ZipFile(source) as archive:
-    target = project / "Assets" / "Art" / "Horse" / "Source"
-    target.mkdir(parents=True, exist_ok=True)
-    for name in ("Horse.blend", "74846 - Low Poly Rigged Horse Model for Video Games - License.html"):
-        (target / name).write_bytes(archive.read(name))
+target = project / "Assets" / "Art" / "Horse" / "Source"
+source = target / "Horse.blend"
+if not source.is_file():
+    raise FileNotFoundError("Bundled horse source is missing: " + str(source))
 
-bpy.ops.wm.open_mainfile(filepath=str(target / "Horse.blend"), load_ui=False)
+bpy.ops.wm.open_mainfile(filepath=str(source), load_ui=False)
 if bpy.context.object and bpy.context.object.mode != 'OBJECT':
     bpy.ops.object.mode_set(mode='OBJECT')
 armature = bpy.data.objects["Armature"]

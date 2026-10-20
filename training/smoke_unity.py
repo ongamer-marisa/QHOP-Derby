@@ -14,7 +14,9 @@ def main():
     parser.add_argument("--executable",type=Path,default=
         Path(__file__).resolve().parents[1]/"Builds/Training/QHopTraining.exe")
     parser.add_argument("--decisions",type=int,default=40)
-    parser.add_argument("--stage",type=int,choices=range(1,7),default=1)
+    parser.add_argument("--stage",type=int,choices=range(1,8),default=1)
+    parser.add_argument("--task-index",type=int,choices=range(3),default=0,
+                        help="Stage 2: 0 trot, 1 canter, 2 gallop")
     parser.add_argument("--areas",type=int,default=1)
     parser.add_argument("--difficulty",type=float,default=0.0)
     parser.add_argument("--shaping",type=float,default=1.0)
@@ -38,7 +40,7 @@ def main():
     last_fallen=False
     first_recovery=None
     with UnityWorkers(args.executable,1,args.stage,args.difficulty,args.shaping,20260928,args.areas,
-                      worker_id_base=900) as workers:
+                      worker_id_base=900,task_index=args.task_index) as workers:
         for index in range(args.decisions):
             state=workers.current[0]["learner"]
             if len(state["decision_obs"]):
@@ -92,7 +94,7 @@ def main():
     print({"transitions":transitions,"terminals":terminals,
            "frozen_transitions":frozen_transitions,"frozen_terminals":frozen_terminals,
            "observation":OBSERVATION,"action":ACTION,
-           "stage":args.stage,"areas":args.areas,
+           "stage":args.stage,"task_index":args.task_index,"areas":args.areas,
            "difficulty":args.difficulty,"shaping":args.shaping,
            "front_angle":args.front_angle,"rear_angle":args.rear_angle,
            "drive":args.drive,"minimum_height":round(minimum_height,3),

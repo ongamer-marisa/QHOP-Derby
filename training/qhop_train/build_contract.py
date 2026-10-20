@@ -3,7 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from .schema import ACTION, OBSERVATION, PHYSICS_FINGERPRINT, VERSION
+from .schema import ACTION, OBSERVATION, PHYSICS_FINGERPRINT, VERSION, LIDAR_CONTRACT, RIG_CONTRACT, MODEL_ARCHITECTURE
 from .curriculum import REWARD_HASH, COURSE_HASH
 
 
@@ -13,7 +13,8 @@ def verify(executable):
     contract=json.loads(sidecar.read_text(encoding="utf-8"))
     expected={"schema_version":VERSION,"observation_size":OBSERVATION,
               "action_size":ACTION,"physics_fingerprint":PHYSICS_FINGERPRINT,
-              "reward_hash":REWARD_HASH,"course_hash":COURSE_HASH}
+              "reward_hash":REWARD_HASH,"course_hash":COURSE_HASH,
+              "lidar_contract":LIDAR_CONTRACT,"rig_contract":RIG_CONTRACT,"model_architecture":MODEL_ARCHITECTURE}
     for name,value in expected.items():
         if contract.get(name)!=value:
             raise ValueError(f"Unity build {name} mismatch: {contract.get(name)} != {value}")

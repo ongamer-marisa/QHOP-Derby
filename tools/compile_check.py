@@ -24,7 +24,8 @@ stub_external = "--stubs" in sys.argv
 sources = list((root / "Assets/Scripts").rglob("*.cs")) + list((root / "Assets/Editor").rglob("*.cs"))
 if core_only:
     sources = [source for source in sources if source.name not in
-               ("HorsePolicyRunner.cs", "BuildTraining.cs", "QHopInferenceProbe.cs")
+               ("HorsePolicyRunner.cs", "BuildTraining.cs", "QHopInferenceProbe.cs", "QHopR14Probe.cs",
+                "QHopJointProbe.cs", "QHopTrainingConsole.cs", "QHopTrainingMenuProbe.cs")
                and "Training" not in source.parts]
     stub = root / "Temp/PolicyRunnerStub.cs"
     stub.write_text("""namespace QHop {
@@ -77,7 +78,9 @@ namespace Unity.InferenceEngine {
   public class Tensor<T> : System.IDisposable { public Tensor(TensorShape s,T[] a) {}
     public T[] DownloadToArray()=>new T[0]; public void Dispose() {} }
   public class Worker : System.IDisposable { public Worker(Model m,BackendType b) {}
-    public void Schedule(Tensor<float> x) {} public object PeekOutput()=>null;
+    public void SetInput(string name,Tensor<float> x) {}
+    public void Schedule() {} public void Schedule(Tensor<float> x) {}
+    public object PeekOutput()=>null; public object PeekOutput(string name)=>null;
     public void Dispose() {} }
   public static class ModelLoader { public static Model Load(ModelAsset a)=>new Model(); }
 }""", encoding="utf-8")

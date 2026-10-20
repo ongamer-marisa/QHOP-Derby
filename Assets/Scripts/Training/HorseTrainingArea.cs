@@ -14,6 +14,7 @@ namespace QHop
     public sealed class HorseTrainingEpisodeLog
     {
         public int version=1,taskIndex;
+        public int morphValidationCase=-1;
         public string episodeId,taskName;
         public float taskDistance,taskTimeLimit,stationaryFraction;
         public float progressMeters;
@@ -25,14 +26,25 @@ namespace QHop
         public float weightedProgress,weightedPosture,weightedSmoothness,
             weightedEffort,weightedSlip,weightedTime,weightedFall,
             weightedFinish,weightedDnf;
+        public float weightedGait,weightedBadGait,weightedHighHoof,weightedFold;
+        public float weightedParticipation,weightedCoordination,weightedProcess,weightedCycle,
+            weightedOrder,weightedSynchrony,weightedMissing,weightedDrag;
+        public float[] jointTargets,jointAngles;
+        public int gaitCycles,correctCycles,badCycles,activeGaitTicks,highHoofTicks;
+        public int synchronyCycles,dragCycles,missingCycles,participationTicks,speedTicks,stableTicks;
+        public float weightedOverspeed;
+        public string gait,lead,contacts;
     }
 
     public sealed class HorseTrainingArea
     {
-        public const string CourseContract="stage1-v2:2m-10s;5m-15s;10m-20s;20m-20s;eval-25;early-pass=0.80,0.60;final-pass=0.90,0.80x3";
+        public const string CourseContract="seven-stage-v4:r14-canonical-limits-lidar-gru-fall-terminal;stage1=walk-trot;stage2=30,50,80m-fixed20s;warmup=1.5-2;eval25;gait-gate=.85;coverage=.9;speed-band=.8";
         public static readonly float[] Stage1Distances={2f,5f,10f,20f};
         public static readonly float[] Stage1Times={10f,15f,20f,20f};
         public static readonly string[] Stage1Names={"初步迈步","连续移动","延长距离","阶段验收"};
+        public static readonly float[] Stage2Distances={30f,50f,80f};
+        public static readonly float[] Stage2Times={20f,20f,20f};
+        public static readonly string[] Stage2Names={"对角小跑","三拍跑","四拍疾驰"};
         readonly Scene scene;
         readonly PhysicsScene physicsScene;
         readonly GameObject root;
@@ -61,14 +73,19 @@ namespace QHop
         readonly List<int> disturbanceFalls=new List<int>();
         int tick;
         int episodeNumber;
+        readonly bool physicsTrace=Array.Exists(Environment.GetCommandLineArgs(),x=>x=="--qhop-physics-trace");
         float nextDisturbance;
         public HorseRaceSession Race { get; private set; }
         public IReadOnlyList<HorseActor> Horses => horses;
+        public HorseGaitTracker Gait(int index) => rewards[index].Gait;
+        public HorseTrainingReward Reward(int index) => rewards[index];
         public IReadOnlyList<int> Disturbances => disturbances;
         public IReadOnlyList<int> Recoveries => recoveries;
-        public float Distance => stage==1?Stage1Distances[taskIndex]:100f;
-        public float TimeLimit => stage==1?Stage1Times[taskIndex]:stage==2||stage==3?45f:stage==4?60f:90f;
-        public string TaskName => stage==1?Stage1Names[taskIndex]:"";
+        public float TargetSpeed => stage==2?(horses.Count>0?(horses[0].Gait.SpeedMin+horses[0].Gait.SpeedMax)*.5f:0f):0f;
+        public float Distance => stage==1?Stage1Distances[taskIndex]:stage==2?Stage2Distances[taskIndex]:100f;
+        public float TimeLimit => stage==1?Stage1Times[taskIndex]:stage==2?Stage2Times[taskIndex]:
+            stage==3||stage==4?45f:stage==5?60f:90f;
+        public string TaskName => stage==1?Stage1Names[taskIndex]:stage==2?Stage2Names[taskIndex]:"";
         public float TimeRemaining => Mathf.Max(0f,TimeLimit-(Race==null?0f:Race.Elapsed));
         public int LearnerHorseId => learnerHorseId;
         public string LastOutcome { get; private set; }
@@ -87,8 +104,8 @@ namespace QHop
             this.episodeChannel=episodeChannel;
             this.preview=preview;
             areaIndex=index;
-            mixedArea=stage>=5 && (difficulty<.5f || index%2==0);
-            learnerHorseId=index%(stage<5?1:4);
+            mixedArea=stage>=6 && (difficulty<.5f || index%2==0);
+            learnerHorseId=index%(stage<6?1:4);
             horsePrefab=prefab;rig=definition;horseMaterial=material;
             random=new System.Random(seed+index*100003);
             scene=SceneManager.CreateScene("QHopTrainingArea_"+index,
@@ -96,7 +113,7 @@ namespace QHop
             physicsScene=scene.GetPhysicsScene();
             root=new GameObject("TrainingAreaRoot");
             SceneManager.MoveGameObjectToScene(root,scene);
-            int count=stage<5?1:4;
+            int count=stage<6?1:4;
             for(int i=0;i<count;i++)
             {
                 var go=new GameObject("TrainingAgent_"+i);
@@ -132,10 +149,10 @@ namespace QHop
 
         void BuildTrack()
         {
-            if(stage<4)
+            if(stage<5)
             {
-                var flat=Box("TrainingGround",new Vector3(0,-.12f,50f),
-                    new Vector3(12f,.2f,110f),true);
+                var flat=Box("TrainingGround",new Vector3(0,-.12f,stage==2?100f:50f),
+                    new Vector3(12f,.2f,stage==2?210f:110f),true);
                 var material=new PhysicsMaterial("TrainingGrip")
                 {staticFriction=1f,dynamicFriction=1f,
                     frictionCombine=PhysicsMaterialCombine.Multiply};
@@ -163,7 +180,7 @@ namespace QHop
                 {staticFriction=friction,dynamicFriction=friction,frictionCombine=PhysicsMaterialCombine.Multiply};
                 tile.GetComponent<Collider>().sharedMaterial=pm;
                 episodeMaterials.Add(pm);
-                if(stage>=4 && section>2 && section<18 && random.NextDouble()<.2*obstacleLevel)
+                if(stage>=5 && section>2 && section<18 && random.NextDouble()<.2*obstacleLevel)
                 {
                     float x=(float)(random.NextDouble()*8-4);
                     float obstacleHeight=.05f+.25f*(float)random.NextDouble()*obstacleLevel;
@@ -173,16 +190,26 @@ namespace QHop
                 }
             }
             }
-            Box("LeftBoundary",new Vector3(-6.8f,.5f,47.5f),new Vector3(.15f,1f,105f),false);
-            Box("RightBoundary",new Vector3(6.8f,.5f,47.5f),new Vector3(.15f,1f,105f),false);
+            Box("LeftBoundary",new Vector3(-6.8f,.5f,stage==2?100f:47.5f),new Vector3(.15f,1f,stage==2?210f:105f),false);
+            Box("RightBoundary",new Vector3(6.8f,.5f,stage==2?100f:47.5f),new Vector3(.15f,1f,stage==2?210f:105f),false);
         }
 
         HorseConfig Configuration(int id)
         {
             var standard=new HorseConfig();
-            if(stage<3 || random.NextDouble()<.2)return standard;
+            if(Array.Exists(Environment.GetCommandLineArgs(),x=>x=="--qhop-validation-morph"))
+            {
+                int k=((episodeNumber-1)*8+areaIndex)%81;float[] sizes={.85f,1f,1.15f};
+                standard.bulk=sizes[k%3];k/=3;standard.frontLength=sizes[k%3];k/=3;
+                standard.backLength=sizes[k%3];k/=3;standard.bodyLength=sizes[k%3];
+                standard.frontStrength=Mathf.Lerp(.55f,1.45f,(standard.frontLength-.85f)/.3f);
+                standard.backStrength=Mathf.Lerp(.55f,1.45f,(standard.backLength-.85f)/.3f);
+                standard.massKg=Mathf.Clamp(450f*standard.bulk*standard.bulk*standard.bodyLength,250f,750f);
+                return standard;
+            }
+            if(stage<4 || random.NextDouble()<.2)return standard;
             var target=HorseGenetics.Generate(random.Next());
-            float alpha=stage==3?difficulty:1f;
+            float alpha=stage==4?difficulty:1f;
             standard.bulk=Mathf.Lerp(1f,target.bulk,alpha);
             standard.frontLength=Mathf.Lerp(1f,target.frontLength,alpha);
             standard.backLength=Mathf.Lerp(1f,target.backLength,alpha);
@@ -190,7 +217,7 @@ namespace QHop
             standard.frontStrength=Mathf.Lerp(1f,target.frontStrength,alpha);
             standard.backStrength=Mathf.Lerp(1f,target.backStrength,alpha);
             standard.massKg=Mathf.Lerp(450f,target.massKg,alpha);
-            standard.hoofSmoothness=stage>=4?target.hoofSmoothness:.3f;
+            standard.hoofSmoothness=stage>=5?target.hoofSmoothness:.3f;
             return standard;
         }
 
@@ -203,7 +230,7 @@ namespace QHop
             episodeObjects.Clear();horses.Clear();rewards.Clear();ended.Clear();
             disturbances.Clear();recoveries.Clear();disturbanceTime.Clear();
             disturbanceSpeed.Clear();disturbanceFalls.Clear();
-            episodeDifficulty=stage==4 && random.NextDouble()<.2?0f:difficulty;
+            episodeDifficulty=stage==5 && random.NextDouble()<.2?0f:difficulty;
             BuildTrack();
             int count=agents.Count;
             float[] lanes={-3.6f,-1.2f,1.2f,3.6f};
@@ -214,16 +241,27 @@ namespace QHop
                 var go=new GameObject("TrainingHorse_"+i);Add(go);
                 go.transform.position=new Vector3(count==1?0f:lanes[i],0f,0f);
                 var horse=go.AddComponent<HorseActor>();
-                horse.Initialize(i,Configuration(i),horsePrefab,rig,horseMaterial,true,!preview);
+                horse.Initialize(i,Configuration(i),horsePrefab,rig,horseMaterial,false,!preview);
                 horse.ExternalActionMode=true;
+                if(physicsTrace && areaIndex==0)
+                {
+                    string details="";
+                    foreach(var body in horse.bodies)details+=body.name+":"+body.position.ToString("F4")+":"+body.rotation.eulerAngles.ToString("F2")+":"+body.GetComponent<Collider>().bounds.size.ToString("F4")+";";
+                    Debug.Log("R14_SPAWN episode="+episodeNumber+" restHeight="+horse.RestTorsoHeight+" geometry="+details);
+                }
+                horse.GaitTask=stage==2?taskIndex:stage==1?-2:-1;
+                if(stage==2)
+                {bool warm=taskIndex==0 && difficulty<.5f;
+                 horse.Gait.SpeedMin=warm?1.5f:taskIndex==0?2f:taskIndex==1?4f:6f;
+                 horse.Gait.SpeedMax=warm?2f:taskIndex==0?4f:taskIndex==1?6f:9f;}
                 horses.Add(horse);
-                rewards.Add(new HorseTrainingReward(stage,shaping,TimeLimit));
+                rewards.Add(new HorseTrainingReward(stage,shaping,TimeLimit,taskIndex,horse.Gait));
                 ended.Add(false);
                 disturbances.Add(0);recoveries.Add(0);
                 disturbanceTime.Add(-1f);disturbanceSpeed.Add(0f);disturbanceFalls.Add(0);
             }
             Physics.SyncTransforms();
-            Race=new HorseRaceSession(horses,Distance,TimeLimit);
+            Race=new HorseRaceSession(horses,Distance,TimeLimit,stage==2,true);
             for(int i=0;i<count;i++)
             {
                 agents[i].Bind(this,horses[i]);
@@ -240,7 +278,7 @@ namespace QHop
 
         public void Step()
         {
-            if(stage>=4 && episodeDifficulty>=.8f && Race.Elapsed>=nextDisturbance)
+            if(stage>=5 && episodeDifficulty>=.8f && Race.Elapsed>=nextDisturbance)
             {
                 nextDisturbance=Race.Elapsed+3f+(float)random.NextDouble()*5f;
                 foreach(var horse in horses)if(horse.IsPolicyActive)
@@ -256,6 +294,13 @@ namespace QHop
                 }
             }
             physicsScene.Simulate(.01f);
+            if(physicsTrace && areaIndex==0 && tick<450 && tick%25==0)
+            {
+                var h=horses[0];string angles="",forces="";
+                foreach(var d in h.LegJoints)angles+=d.Measured.ToString("F2")+",";
+                foreach(var j in h.allJoints)forces+=j.slerpDrive.maximumForce+",";
+                Debug.Log("R14_RUNTIME episode="+episodeNumber+" tick="+tick+" pos="+h.Torso.position.ToString("F4")+" rot="+h.Torso.rotation.eulerAngles.ToString("F2")+" contacts="+h.Gait.Contacts+" angles="+angles+" forces="+forces);
+            }
             foreach(var horse in horses)horse.FixedStep(horses,true);
             Race.Step(.01f);
             for(int i=0;i<horses.Count;i++)if(disturbanceTime[i]>=0f &&
@@ -277,6 +322,7 @@ namespace QHop
                     var episode=new HorseTrainingEpisodeLog
                     {
                         episodeId=areaIndex+"-"+episodeNumber+"-"+i,
+                        morphValidationCase=Array.Exists(Environment.GetCommandLineArgs(),x=>x=="--qhop-validation-morph")?((episodeNumber-1)*8+areaIndex)%81:-1,
                         taskIndex=taskIndex,taskName=TaskName,taskDistance=Distance,
                         taskTimeLimit=TimeLimit,
                         progressMeters=reward.Progress*horses[i].RestTorsoHeight,
@@ -300,7 +346,25 @@ namespace QHop
                         weightedTime=reward.WeightedTime,
                         weightedFall=reward.WeightedFall,
                         weightedFinish=reward.WeightedFinish,
-                        weightedDnf=reward.WeightedDnf
+                        weightedDnf=reward.WeightedDnf,
+                        jointTargets=horses[i].LegJoints.ConvertAll(d=>d.Target).ToArray(),
+                        jointAngles=horses[i].LegJoints.ConvertAll(d=>d.Measured).ToArray(),
+                        weightedParticipation=reward.WeightedParticipation,weightedCoordination=reward.WeightedCoordination,
+                        weightedProcess=reward.WeightedProcess,weightedCycle=reward.WeightedCycle,
+                        weightedOrder=reward.WeightedOrder,weightedSynchrony=reward.WeightedSynchrony,
+                        weightedMissing=reward.WeightedMissing,weightedDrag=reward.WeightedDrag,
+                        weightedGait=reward.WeightedGait,
+                        weightedBadGait=reward.WeightedBadGait,
+                        weightedHighHoof=reward.WeightedHighHoof,
+                        weightedFold=reward.WeightedFold,
+                        gaitCycles=reward.Gait.Cycles,correctCycles=reward.Gait.CorrectCycles,
+                        badCycles=reward.Gait.BadCycles,activeGaitTicks=reward.Gait.ActiveTicks,
+                        highHoofTicks=reward.Gait.HighTicks,
+                        synchronyCycles=reward.Gait.SynchronyCycles,dragCycles=reward.Gait.DragCycles,
+                        missingCycles=reward.Gait.MissingCycles,participationTicks=reward.Gait.ParticipationTicks,
+                        speedTicks=reward.Gait.SpeedTicks,stableTicks=reward.Gait.StableTicks,
+                        weightedOverspeed=reward.WeightedOverspeed,gait=reward.Gait.Gait,
+                        lead=reward.Gait.Lead,contacts=reward.Gait.Contacts
                     };
                     string json=JsonUtility.ToJson(episode);
                     Debug.Log("QHOP_EPISODE "+json);
@@ -342,7 +406,9 @@ namespace QHop
         QHopEpisodeSideChannel episodeChannel;
         int taskIndex;
         long previewSequence;
-        [Serializable] sealed class StageGoals { public StageGoal[] stages; public Stage1Task[] stage1Tasks; }
+        bool showLidar;
+        bool screenshotQueued;
+        [Serializable] sealed class StageGoals { public StageGoal[] stages; public Stage1Task[] stage1Tasks,stage2Tasks; }
         [Serializable] sealed class StageGoal { public string name,goal,metric; }
         [Serializable] sealed class Stage1Task { public string name; public float distance,timeLimit; }
         static float Setting(string name,float fallback)
@@ -380,14 +446,19 @@ namespace QHop
             Time.fixedDeltaTime=.01f;
             QualitySettings.vSyncCount=0;
             preview=Setting("preview",0)>0.5f;
+            showLidar=Setting("lidar-debug",0)>.5f;
             Application.targetFrameRate=preview?60:-1;
-            stage=Mathf.Clamp(Mathf.RoundToInt(Setting("stage",1)),1,6);
-            taskIndex=stage==1?Mathf.RoundToInt(Setting("task-index",0)):0;
+            stage=Mathf.Clamp(Mathf.RoundToInt(Setting("stage",1)),1,7);
+            taskIndex=stage<=2?Mathf.RoundToInt(Setting("task-index",0)):0;
             if(stage==1 && (taskIndex<0 || taskIndex>=HorseTrainingArea.Stage1Distances.Length))
                 throw new InvalidOperationException("Invalid Stage 1 task index");
-            float expectedDistance=stage==1?HorseTrainingArea.Stage1Distances[taskIndex]:100f;
+            if(stage==2 && (taskIndex<0 || taskIndex>=HorseTrainingArea.Stage2Distances.Length))
+                throw new InvalidOperationException("Invalid Stage 2 task index");
+            float expectedDistance=stage==1?HorseTrainingArea.Stage1Distances[taskIndex]:
+                stage==2?HorseTrainingArea.Stage2Distances[taskIndex]:100f;
             float expectedTime=stage==1?HorseTrainingArea.Stage1Times[taskIndex]:
-                stage==2||stage==3?45f:stage==4?60f:90f;
+                stage==2?HorseTrainingArea.Stage2Times[taskIndex]:
+                stage==3||stage==4?45f:stage==5?60f:90f;
             if(Mathf.Abs(Setting("distance",expectedDistance)-expectedDistance)>.001f ||
                 Mathf.Abs(Setting("time-limit",expectedTime)-expectedTime)>.001f)
                 throw new InvalidOperationException("Unity task distance/time contract mismatch");
@@ -395,7 +466,7 @@ namespace QHop
             shaping=Mathf.Clamp01(Setting("shaping",1));
             seed=Mathf.RoundToInt(Setting("seed",20260927));
             previewUpdate=Mathf.RoundToInt(Setting("preview-update",0));
-            int count=preview?1:Mathf.Clamp(Mathf.RoundToInt(Setting("areas",stage<5?8:2)),1,32);
+            int count=preview?1:Mathf.Clamp(Mathf.RoundToInt(Setting("areas",stage<6?8:2)),1,32);
             var prefab=Resources.Load<GameObject>("HorseGame");
             if(prefab==null)throw new InvalidOperationException("HorseGame.fbx is unavailable");
             rig=ScriptableObject.CreateInstance<HorseRigDefinition>();
@@ -430,6 +501,9 @@ namespace QHop
             previewCamera.transform.position=Vector3.Lerp(previewCamera.transform.position,
                 target+new Vector3(9f,5f,-12f),.12f);
             previewCamera.transform.LookAt(target+Vector3.up);
+            string screenshot=TextSetting("screenshot");
+            if(!screenshotQueued && !string.IsNullOrEmpty(screenshot) && Time.unscaledTime>=1f)
+            {ScreenCapture.CaptureScreenshot(screenshot);screenshotQueued=true;}
         }
         void OnGUI()
         {
@@ -440,12 +514,15 @@ namespace QHop
                 goals.stages[stage-1]:null;
             var horse=area.Horses[Mathf.Clamp(observed,0,area.Horses.Count-1)];
             var result=area.Race.Results[horse.Id];
-            GUILayout.BeginArea(new Rect(12,12,710,260),GUI.skin.box);
+            GUILayout.BeginArea(new Rect(12,12,1050,510),GUI.skin.box);
+            showLidar=GUILayout.Toggle(showLidar,"显示 LiDAR 扫描（57条，5Hz）");
+            horse.Lidar.Draw(horse,showLidar);
+            GUILayout.Label("LiDAR scan #"+horse.Lidar.Sequence+" age="+horse.Lidar.Age.ToString("F2")+"s | Python GRU updates (active learners)="+QHopEpisodeSideChannel.VisionUpdateMin+".."+QHopEpisodeSideChannel.VisionUpdateMax);
             GUILayout.Label(goal==null?"Stage "+stage:goal.name+" | "+goal.goal);
             var shownTask=stage==1 && goals!=null && goals.stage1Tasks!=null &&
                 goals.stage1Tasks.Length>taskIndex?goals.stage1Tasks[taskIndex].name:area.TaskName;
-            if(stage==1)GUILayout.Label("当前子任务："+shownTask+"；"+
-                area.Distance.ToString("F0")+" 米 / "+area.TimeLimit.ToString("F0")+" 秒；最终目标：20 米 / 20 秒");
+            if(stage<=2)GUILayout.Label("当前子任务："+shownTask+"；"+
+                area.Distance.ToString("F0")+" 米 / "+area.TimeLimit.ToString("F0")+" 秒");
             if(goal!=null)GUILayout.Label("自动目标："+goal.metric);
             GUILayout.Label("Checkpoint update "+previewUpdate+" | Seed "+seed+
                 " | 观察马 "+horse.Id+" | 策略马 "+area.LearnerHorseId+
@@ -455,6 +532,22 @@ namespace QHop
                 area.Race.Elapsed.ToString("F1")+" s | 罚停 "+result.falls);
             GUILayout.Label(result.finished?"完赛，名次 "+result.rank:result.dnf?"DNF: "+result.reason:
                 horse.FallWaitRemaining>0?"罚停中":"进行中");
+            var gait=area.Gait(horse.Id);
+            GUILayout.Label("四蹄接触 FL FR HL HR: "+gait.Contacts+
+                " | 步态 "+gait.Gait+" | 领跑 "+gait.Lead+
+                " | 正确 "+gait.CorrectRatio.ToString("P1")+
+                " | 错误 "+gait.BadRatio.ToString("P1")+
+                " | 抬蹄超限 "+gait.HighFraction.ToString("P1"));
+            GUILayout.Label("四腿参与 "+gait.ParticipationFraction.ToString("P1")+" | 同步拍地 "+gait.SynchronyRatio.ToString("P1")+" | 拖蹄 "+gait.DragCycles+" | 缺腿 "+gait.MissingCycles);
+            var parts=area.Reward(horse.Id);
+            GUILayout.Label("奖励：速度 "+parts.WeightedProgress.ToString("F2")+" 参与 "+parts.WeightedParticipation.ToString("F2")+" 协调 "+parts.WeightedCoordination.ToString("F2")+" 过程 "+parts.WeightedProcess.ToString("F2")+" 周期 "+parts.WeightedCycle.ToString("F2"));
+            GUILayout.Label("惩罚：错序 "+parts.WeightedOrder.ToString("F2")+" 同步 "+parts.WeightedSynchrony.ToString("F2")+" 缺腿 "+parts.WeightedMissing.ToString("F2")+" 拖蹄 "+parts.WeightedDrag.ToString("F2")+" 抬蹄 "+parts.WeightedHighHoof.ToString("F2")+" 折叠 "+parts.WeightedFold.ToString("F2"));
+            for(int foot=0;foot<4;foot++)
+            {
+                string angles="";for(int part=0;part<4;part++)
+                {var d=horse.LegJoints[foot*4+part];angles+=" "+d.Target.ToString("F0")+"/"+d.Measured.ToString("F0");}
+                GUILayout.Label(new[]{"FL","FR","HL","HR"}[foot]+": "+gait.Timeline(foot)+" | 目标/实际°"+angles);
+            }
             if(!string.IsNullOrEmpty(area.LastOutcome))GUILayout.Label("上回合："+area.LastOutcome);
             if(GUILayout.Button("切换观察马"))observed=(observed+1)%area.Horses.Count;
             if(GUILayout.Button("重试同一 seed"))PreviewRestart(false);

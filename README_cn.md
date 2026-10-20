@@ -2,11 +2,13 @@
 
 [日本語](README.md)
 
-Unity 6000.0.45f1 / URP 17.0.1。打开根目录作为 Unity 项目，选择 `Assets/Scenes/DerbyStraight.unity` 或 `Assets/Scenes/AttributeLab.unity`，按 Play。六阶段训练的安装、构建和命令见 [training/README_cn.md](training/README_cn.md)。
+Unity 6000.0.45f1 / URP 17.0.1。打开根目录作为 Unity 项目，选择 `Assets/Scenes/DerbyStraight.unity` 或 `Assets/Scenes/AttributeLab.unity`，按 Play。七阶段训练的安装、构建和命令见 [training/README_cn.md](training/README_cn.md)。
+
+当前训练版本为r14：1285维观测、57根5Hz LiDAR、共享GRU视觉记忆；训练摔倒即失败，最终游戏保留辅助复位。旧模型需保留在旧实验中，新版从头训练。见 [r14验收记录](training/r14-validation.md)。
 
 ## 训练快速入口
 
-日常训练可在 Unity Editor 选择 **QHOP → 训练 → 打开训练控制台**。控制台提供开始、结束并保存、断点继续、从指定 checkpoint 完整恢复、可见阶段验证和人工晋级；每阶段自动评估连续三次达标后会停在“待人工验证”，完成至少一回合可视化观察并由你确认后才进入下一阶段。打开验证窗口时，正在运行的训练先安全停止。完整操作见[训练说明](training/README_cn.md#unity-训练控制台与人工晋级)。
+日常训练可在 Unity Editor 选择 **QHOP → 训练 → 打开训练控制台**。控制台提供开始、结束并保存、断点继续、可见阶段验证和人工晋级；阶段评估达标后会停在“待人工验证”，完成至少一回合可视化观察并由你确认后才进入下一阶段。打开验证窗口时，正在运行的训练先安全停止。完整操作见[训练说明](training/README_cn.md#unity-训练控制台与人工晋级)。
 
 Stage 1 现按 2／5／10／20 米逐档学习。新训练 Player 使用奖励及课程哈希校验 checkpoint；旧实验保留在原目录，点击“开始训练”会选用新的实验目录。控制台可查看最近 100 回合的前进、摔倒和静止比例。
 
@@ -53,4 +55,8 @@ $env:PYTHONPATH = 'training'
 
 ## 当前限制
 
-训练器的短程采样、PPO 更新、checkpoint 恢复和 ONNX 数值对齐已验证；尚无经过六阶段正式训练及 500 场独立验收的比赛模型，详见 [docs/VALIDATION_cn.md](docs/VALIDATION_cn.md)。
+训练器的短程采样、PPO 更新、checkpoint 恢复和 ONNX 数值对齐已验证；尚无经过七阶段正式训练及 500 场独立验收的比赛模型，详见 [docs/VALIDATION_cn.md](docs/VALIDATION_cn.md)。
+
+## Git 仓库内容
+
+仓库保留源码、Unity 资源及对应 `.meta`、Packages、ProjectSettings、复现工具与验证记录，不附带训练完成的模型。`Runs/`、`Builds/`、`backup/`、Unity/Python 缓存、虚拟环境、本地配置、checkpoint 和导出模型由 `.gitignore` 排除。详细规则见[仓库内容管理](docs/REPOSITORY_CONTENTS_cn.md)。

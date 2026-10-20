@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Net.NetworkInformation;
 using System.Security.Cryptography;
@@ -12,6 +13,7 @@ public sealed class QHopTrainingConsoleState : ScriptableSingleton<QHopTrainingC
 {
     public string runDirectory="";
     public int seed=20260927,workers=4,batch=16384,previewSeed=92500,extraSteps=0;
+    public float simulationSpeed=1f;
     public int trainerPid,previewPid;
     public long trainerStartTicks,previewStartTicks;
     public double trainerLaunchUnix,previewLaunchUnix;
@@ -24,6 +26,8 @@ public sealed class QHopTrainingConsoleState : ScriptableSingleton<QHopTrainingC
 [InitializeOnLoad]
 public sealed class QHopTrainingConsole : EditorWindow
 {
+    const int MaxWorkers=8;
+    const float MaxSimulationSpeed=20f;
     [Serializable] sealed class ReviewStatus
     {
         public string status,candidate,candidate_sha256,approved_at;
@@ -49,6 +53,8 @@ public sealed class QHopTrainingConsole : EditorWindow
     {
         public int stage,task_index;
         public float completion,fall_free,median_speed,falls_per_100m,
+            gait_coverage,correct_cycle_ratio,bad_cycle_ratio,high_hoof_fraction,
+            synchrony_cycle_ratio,four_leg_participation,speed_band_fraction,
             worst_morphology_completion,disturbance_recovery,median_time;
         public int collision_rule_errors;
     }
@@ -71,7 +77,7 @@ public sealed class QHopTrainingConsole : EditorWindow
         public bool unity_build_contract_matches,unity_schema_matches,cuda_available;
         public string unity_build_sha256,unity_build_error,reward_hash,course_hash;
     }
-    [Serializable] sealed class StageGoals { public StageGoal[] stages; public Stage1Task[] stage1Tasks; }
+    [Serializable] sealed class StageGoals { public StageGoal[] stages; public Stage1Task[] stage1Tasks,stage2Tasks; }
     [Serializable] sealed class StageGoal { public string name,goal,metric; }
     [Serializable] sealed class Stage1Task { public string name; public float distance,timeLimit; }
     [Serializable] sealed class EpisodeSummary
@@ -79,6 +85,10 @@ public sealed class QHopTrainingConsole : EditorWindow
         public int episodes,dnf_total;
         public float completion,progress_m,falls,stationary_fraction,reward_progress,
             reward_posture,reward_time,reward_fall,reward_finish,reward_dnf,
+            reward_gait,reward_bad_gait,reward_high_hoof,reward_fold,
+            reward_participation,reward_coordination,reward_process,reward_cycle,
+            reward_order,reward_synchrony,reward_missing,reward_drag,
+            correct_cycle_ratio,bad_cycle_ratio,high_hoof_fraction,
             filtered_posture_m,filtered_ground_m,filtered_inactive_m,filtered_boundary_m;
     }
 
@@ -110,6 +120,8 @@ public sealed class QHopTrainingConsole : EditorWindow
     public static void ResumeChosenFromMenu(){Open();GetWindow<QHopTrainingConsole>().ResumeChosen();}
     [MenuItem("QHOP/训练/启动阶段验证",priority=15)]
     public static void PreviewFromMenu(){Open();GetWindow<QHopTrainingConsole>().StartPreview();}
+    [MenuItem("QHOP/训练/从第一阶段迁移到步态训练…",priority=17)]
+    public static void TransferFromMenu(){Open();GetWindow<QHopTrainingConsole>().TransferStage1();}
     [MenuItem("QHOP/训练/人工通过并进入下一阶段",priority=16)]
     public static void ApproveFromMenu(){Open();GetWindow<QHopTrainingConsole>().Approve();}
 
@@ -140,7 +152,15 @@ public sealed class QHopTrainingConsole : EditorWindow
     }
     static T Read<T>(string path) where T:class
     {
-        try{return File.Exists(path)?JsonUtility.FromJson<T>(File.ReadAllText(path)):null;}
+        try
+        {
+            string text;
+            using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,
+                FileShare.ReadWrite|FileShare.Delete))
+            using(var reader=new StreamReader(stream,Encoding.UTF8,true))
+                text=reader.ReadToEnd();
+            return JsonUtility.FromJson<T>(text);
+        }
         catch(Exception){return null;}
     }
     static bool OwnedProcess(int pid,long ticks)
@@ -188,26 +208,31 @@ public sealed class QHopTrainingConsole : EditorWindow
         foreach(var value in values){if(builder.Length>0)builder.Append(' ');builder.Append(Quote(value));}
         return builder.ToString();
     }
-    static Process StartPython(params string[] args)
+    static ProcessStartInfo PythonStartInfo(bool training,params string[] args)
     {
         var start=new ProcessStartInfo(Python,"-m qhop_train.cli "+Args(args));
         start.WorkingDirectory=Root;
         start.UseShellExecute=false;
         start.CreateNoWindow=true;
         start.EnvironmentVariables["PYTHONPATH"]=Path.Combine(Root,"training");
+        var speed=training?State.simulationSpeed:1f;
+        if(float.IsNaN(speed) || float.IsInfinity(speed) || speed<1f || speed>MaxSimulationSpeed)
+            throw new InvalidOperationException("仿真速度必须在 1–20 倍之间");
+        start.EnvironmentVariables["QHOP_TRAIN_TIME_SCALE"]=speed.ToString(CultureInfo.InvariantCulture);
+        return start;
+    }
+    static Process StartPython(bool training,params string[] args)
+    {
+        var start=PythonStartInfo(training,args);
         var process=Process.Start(start);
         if(process==null)throw new InvalidOperationException("Python process did not start");
         return process;
     }
     static string RunPython(out int code,params string[] args)
     {
-        var start=new ProcessStartInfo(Python,"-m qhop_train.cli "+Args(args));
-        start.WorkingDirectory=Root;
-        start.UseShellExecute=false;
-        start.CreateNoWindow=true;
+        var start=PythonStartInfo(false,args);
         start.RedirectStandardOutput=true;
         start.RedirectStandardError=true;
-        start.EnvironmentVariables["PYTHONPATH"]=Path.Combine(Root,"training");
         using(var process=Process.Start(start))
         {
             if(process==null)throw new InvalidOperationException("Python process did not start");
@@ -319,7 +344,7 @@ public sealed class QHopTrainingConsole : EditorWindow
                 State.Store();
             }
             Directory.CreateDirectory(Run);
-            var process=StartPython("--log-file",Path.Combine(Run,"console.log"),
+            var process=StartPython(true,"--log-file",Path.Combine(Run,"console.log"),
                 "train","--output",Run,"--workers",State.workers.ToString(),
                 "--batch",State.batch.ToString(),"--seed",State.seed.ToString());
             State.trainerPid=process.Id;State.trainerStartTicks=process.StartTime.Ticks;
@@ -328,6 +353,11 @@ public sealed class QHopTrainingConsole : EditorWindow
             State.notice="已启动 Stage 1；等待会话状态文件";State.Store();
         }
         catch(Exception error){Fail(error);}
+    }
+    void TransferStage1(bool adapt=false)
+    {
+        State.notice="r14 LiDAR/GRU 需要从头训练，不支持旧模型迁移。旧实验保持可读。";
+        State.Store();Repaint();
     }
     void StartResume(string checkpoint)
     {
@@ -343,7 +373,7 @@ public sealed class QHopTrainingConsole : EditorWindow
         State.seed=info.seed;
         CheckPorts(true,State.workers);
         Directory.CreateDirectory(Run);
-        var process=StartPython("--log-file",Path.Combine(Run,"console.log"),
+        var process=StartPython(true,"--log-file",Path.Combine(Run,"console.log"),
             "resume","--checkpoint",checkpoint,"--output",Run,
             "--workers",State.workers.ToString(),"--batch",State.batch.ToString(),
             "--seed",State.seed.ToString(),"--extra-steps",State.extraSteps.ToString());
@@ -448,7 +478,7 @@ public sealed class QHopTrainingConsole : EditorWindow
             status.review.candidate:Path.Combine(Run,"latest.pt");
         if(!File.Exists(path))throw new FileNotFoundException("验证 checkpoint 不存在",path);
         Inspect(path,doctor);
-        var process=StartPython("--log-file",Path.Combine(Run,"preview-console.log"),
+        var process=StartPython(false,"--log-file",Path.Combine(Run,"preview-console.log"),
             "preview","--checkpoint",path,"--output",Run,
             "--seed",State.previewSeed.ToString());
         State.previewPid=process.Id;State.previewStartTicks=process.StartTime.Ticks;
@@ -501,10 +531,12 @@ public sealed class QHopTrainingConsole : EditorWindow
         state.runDirectory=EditorGUILayout.TextField("实验目录",state.runDirectory);
         EditorGUI.EndDisabledGroup();
         state.seed=EditorGUILayout.IntField("随机种子",state.seed);
-        state.workers=EditorGUILayout.IntSlider("并行进程",state.workers,1,4);
+        state.workers=EditorGUILayout.IntSlider("并行进程",state.workers,1,MaxWorkers);
+        state.simulationSpeed=EditorGUILayout.Slider("仿真速度（倍）",state.simulationSpeed,1f,MaxSimulationSpeed);
         state.batch=Mathf.Max(1,EditorGUILayout.IntField("Batch",state.batch));
         state.previewSeed=EditorGUILayout.IntField("验证 seed",state.previewSeed);
         state.extraSteps=Mathf.Max(0,EditorGUILayout.IntField("追加阶段步数",state.extraSteps));
+        EditorGUILayout.HelpBox("进程数和仿真速度在下次启动训练时生效；调整速度需先结束训练并保存，再断点继续。断点继续沿用 checkpoint 的进程数，阶段验证保持实时。",MessageType.Info);
         if(GUI.changed)state.Store();
         EditorGUILayout.Space();
         EditorGUILayout.LabelField("状态",status==null?"无会话":status.status);
@@ -519,13 +551,22 @@ public sealed class QHopTrainingConsole : EditorWindow
                     current.distance.ToString("F0")+" 米 / "+
                     current.timeLimit.ToString("F0")+" 秒；最终目标 20 米 / 20 秒");
             }
+            if(status.stage==2 && goals!=null && goals.stage2Tasks!=null &&
+               status.task_index>=0 && status.task_index<goals.stage2Tasks.Length)
+            {
+                var current=goals.stage2Tasks[status.task_index];
+                EditorGUILayout.LabelField("当前子任务",current.name+"；"+
+                    current.distance.ToString("F0")+" 米 / "+
+                    current.timeLimit.ToString("F0")+" 秒");
+            }
             EditorGUILayout.LabelField("累计步数 / 阶段步数",status.global_steps+" / "+status.phase_steps);
-            var budgets=new[]{3000000,8000000,12000000,15000000,15000000,10000000};
-            if(status.stage>=1 && status.stage<=6)
+            var budgets=new[]{3000000,8000000,8000000,12000000,15000000,15000000,10000000};
+            if(status.stage>=1 && status.stage<=7)
                 EditorGUILayout.LabelField("阶段预算",budgets[status.stage-1].ToString());
             EditorGUILayout.LabelField("PPO 更新 / 学习率",status.updates+" / "+status.learning_rate.ToString("G6"));
             EditorGUILayout.LabelField("有效采样率",status.horse_steps_per_second.ToString("F1")+" 马步/秒");
-            EditorGUILayout.LabelField("自动评估连续达标",status.passes+" / 3");
+            int requiredPasses=status.stage==2 && status.task_index<2?2:3;
+            EditorGUILayout.LabelField("自动评估连续达标",status.passes+" / "+requiredPasses);
             if(status.recent100!=null && status.recent100.episodes>0)
             {
                 var recent=status.recent100;
@@ -541,6 +582,17 @@ public sealed class QHopTrainingConsole : EditorWindow
                     "；摔倒 "+recent.reward_fall.ToString("F2")+
                     "；完赛 "+recent.reward_finish.ToString("F2")+
                     "；DNF "+recent.reward_dnf.ToString("F2"),EditorStyles.wordWrappedLabel);
+                EditorGUILayout.LabelField("步态奖励与约束",
+                    "正向步态 "+recent.reward_gait.ToString("F2")+
+                    "；错误 "+recent.reward_bad_gait.ToString("F2")+
+                    "；高抬蹄 "+recent.reward_high_hoof.ToString("F2")+
+                    "；折叠 "+recent.reward_fold.ToString("F2"),EditorStyles.wordWrappedLabel);
+                EditorGUILayout.LabelField("步态奖励分项",
+                    "参与 "+recent.reward_participation.ToString("F2")+"；协调 "+recent.reward_coordination.ToString("F2")+
+                    "；顺序进展 "+recent.reward_process.ToString("F2")+"；完整周期 "+recent.reward_cycle.ToString("F2"),EditorStyles.wordWrappedLabel);
+                EditorGUILayout.LabelField("错误惩罚分项",
+                    "乱序 "+recent.reward_order.ToString("F2")+"；同步 "+recent.reward_synchrony.ToString("F2")+
+                    "；缺腿 "+recent.reward_missing.ToString("F2")+"；拖蹄 "+recent.reward_drag.ToString("F2"),EditorStyles.wordWrappedLabel);
                 EditorGUILayout.LabelField("过滤的前进位移",
                     "姿态 "+recent.filtered_posture_m.ToString("F2")+
                     " m；躯干接地 "+recent.filtered_ground_m.ToString("F2")+
@@ -555,17 +607,26 @@ public sealed class QHopTrainingConsole : EditorWindow
                    evaluation.task_index>=0 && evaluation.task_index<goals.stage1Tasks.Length)
                     EditorGUILayout.LabelField("最近评估子任务",
                         goals.stage1Tasks[evaluation.task_index].name);
+                if(status.stage==2 && goals!=null && goals.stage2Tasks!=null &&
+                   evaluation.task_index>=0 && evaluation.task_index<goals.stage2Tasks.Length)
+                    EditorGUILayout.LabelField("最近评估子任务",
+                        goals.stage2Tasks[evaluation.task_index].name);
                 EditorGUILayout.LabelField("最近评估", "完赛 "+evaluation.completion.ToString("P1")+
                     "；无摔倒 "+evaluation.fall_free.ToString("P1")+
                     "；中位速度 "+evaluation.median_speed.ToString("F2")+" m/s"+
                     "；中位时间 "+evaluation.median_time.ToString("F2")+" s"+
                     "；摔倒/100m "+evaluation.falls_per_100m.ToString("F2"),
                     EditorStyles.wordWrappedLabel);
-                if(status.stage==3)EditorGUILayout.LabelField("最差体型组完赛率",
+                EditorGUILayout.LabelField("步态评估",
+                    "四腿参与 "+evaluation.four_leg_participation.ToString("P1")+"；同步拍地 "+evaluation.synchrony_cycle_ratio.ToString("P1")+"；速度达标 "+evaluation.speed_band_fraction.ToString("P1")+"；覆盖 "+evaluation.gait_coverage.ToString("P1")+
+                    "；正确 "+evaluation.correct_cycle_ratio.ToString("P1")+
+                    "；错误 "+evaluation.bad_cycle_ratio.ToString("P1")+
+                    "；高抬蹄 "+evaluation.high_hoof_fraction.ToString("P1"));
+                if(status.stage==4)EditorGUILayout.LabelField("最差体型组完赛率",
                     evaluation.worst_morphology_completion.ToString("P1"));
-                if(status.stage==4)EditorGUILayout.LabelField("扰动恢复率",
+                if(status.stage==5)EditorGUILayout.LabelField("扰动恢复率",
                     evaluation.disturbance_recovery.ToString("P1"));
-                if(status.stage==5)EditorGUILayout.LabelField("碰撞规则异常",
+                if(status.stage==6)EditorGUILayout.LabelField("碰撞规则异常",
                     evaluation.collision_rule_errors.ToString());
             }
             EditorGUILayout.LabelField("最近 checkpoint",status.checkpoint??"");
@@ -603,6 +664,8 @@ public sealed class QHopTrainingConsole : EditorWindow
         EditorGUILayout.EndHorizontal();
         EditorGUILayout.BeginHorizontal();
         if(GUILayout.Button("从 checkpoint 继续…"))ResumeChosen();
+        EditorGUILayout.HelpBox("r14：从头训练；旧 checkpoint 不可迁移或续训。",MessageType.Info);
+
         if(GUILayout.Button("启动阶段验证"))StartPreview();
         EditorGUI.BeginDisabledGroup(status==null || status.review==null ||
             status.review.status!="pending" || status.passes<3 ||
@@ -623,7 +686,7 @@ public sealed class QHopTrainingConsole : EditorWindow
             state.stopRequestedUnix>0 && UnixNow()-state.stopRequestedUnix>30 &&
             GUILayout.Button("强制结束本会话进程树（仅安全停止超时使用）"))ForceStop();
         EditorGUILayout.Space();
-        EditorGUILayout.LabelField("六阶段目标",EditorStyles.boldLabel);
+        EditorGUILayout.LabelField("七阶段目标",EditorStyles.boldLabel);
         if(goals!=null && goals.stages!=null)
             for(int i=0;i<goals.stages.Length;i++)
             {

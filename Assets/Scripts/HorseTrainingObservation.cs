@@ -7,15 +7,17 @@ namespace QHop
 {
     public static class HorseTrainingObservation
     {
-        public const int Version=2;
+        public const int Version=4;
         // Bump together with training/schema.py after changing control/physics semantics.
-        public const string PhysicsFingerprint="qh-100hz-5step-19rb-28a-r10";
+        public const string PhysicsFingerprint="qh-100hz-5step-19rb-28a-lidar-gru-terminal-r14";
         public const int ProprioFrame=243;
         public const int History=4;
         public const int Terrain=70;
         public const int Opponent=12;
         public const int Opponents=3;
-        public const int Size=ProprioFrame*History+Terrain+Opponent*Opponents;
+        public const int GaitState=28;
+        public const int BaseSize=ProprioFrame*History+Terrain+Opponent*Opponents+GaitState;
+        public const int Size=BaseSize+HorseLidar.Size;
 
         public static float[] Frame(HorseActor horse, HorseRaceResult race, float remainingTime,
             float courseLength,int disturbanceCount=0,int recoveredCount=0)
@@ -130,14 +132,16 @@ namespace QHop
             frames.Clear();
             for(int i=0;i<HorseTrainingObservation.History;i++)frames.Enqueue((float[])frame.Clone());
         }
-        public float[] Build(float[] frame,float[] terrain,float[] opponents)
+        public float[] Build(float[] frame,float[] terrain,float[] opponents,float[] gait=null,float[] lidar=null)
         {
             if(frames.Count==0)Reset(frame);
             else {frames.Dequeue();frames.Enqueue((float[])frame.Clone());}
             var result=new float[HorseTrainingObservation.Size];int offset=0;
             foreach(var old in frames){Array.Copy(old,0,result,offset,old.Length);offset+=old.Length;}
             Array.Copy(terrain,0,result,offset,terrain.Length);offset+=terrain.Length;
-            Array.Copy(opponents,0,result,offset,opponents.Length);
+            Array.Copy(opponents,0,result,offset,opponents.Length);offset+=opponents.Length;
+            if(gait!=null)Array.Copy(gait,0,result,offset,HorseTrainingObservation.GaitState);
+            if(lidar!=null)Array.Copy(lidar,0,result,HorseTrainingObservation.BaseSize,HorseLidar.Size);
             return result;
         }
     }

@@ -9,6 +9,8 @@ import tempfile
 import time
 import uuid
 
+from .atomic_io import cleanup_temporary, replace_with_retry
+
 
 REVIEW_VERSION = 1
 
@@ -16,16 +18,17 @@ REVIEW_VERSION = 1
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent,
-                                     prefix=".qhop-", suffix=".json", delete=False) as stream:
-        temporary = Path(stream.name)
-        json.dump(value, stream, ensure_ascii=False, indent=2)
-        stream.flush()
-        os.fsync(stream.fileno())
+    stream = tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent,
+                                         prefix=".qhop-", suffix=".json", delete=False)
+    temporary = Path(stream.name)
     try:
-        os.replace(temporary, path)
+        with stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        replace_with_retry(temporary, path)
     finally:
-        temporary.unlink(missing_ok=True)
+        cleanup_temporary(temporary)
 
 
 def read_json(path, default=None):
@@ -118,7 +121,8 @@ class Session:
                  "phase_steps": state.get("phase_steps", 0),
                  "updates": state.get("global_updates", 0),
                  "passes": state.get("passes", 0),
-                 "task_index":state.get("stage1_task_index",0),
+                 "task_index":state.get("stage1_task_index",0) if state.get("stage")==1
+                     else state.get("stage2_task_index",0) if state.get("stage")==2 else 0,
                  "recent100":state.get("recent_episodes_summary",{}),
                  "learning_rate": extra.pop("learning_rate", None),
                  "checkpoint": str(self.directory / "latest.pt"),
